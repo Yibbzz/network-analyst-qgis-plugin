@@ -3,7 +3,6 @@ import json
 from qgis.core import Qgis, QgsMapLayerProxyModel
 from qgis.gui import QgisInterface
 from qgis.PyQt import uic
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QTextEdit, QWidget
 
 from ...global_definitions import SETTINGS_WIDGETS_MAP, RouterProfile
