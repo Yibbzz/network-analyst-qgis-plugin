@@ -2,11 +2,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Type
 
 from qgis.core import (
+    Qgis,
+    QgsCoordinateTransform,
     QgsFeatureSink,
     QgsFeatureSource,
     QgsFields,
+    QgsGeometry,
     QgsProcessing,
     QgsProcessingAlgorithm,
+    QgsProcessingException,
     QgsProcessingParameterBoolean,
     QgsProcessingParameterDefinition,
     QgsProcessingParameterEnum,
@@ -19,6 +23,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 
+from ...core.barriers import drop_unmatched, point_barrier_lines, polygon_barrier_lines
 from ...core.results_factory import ResultsFactory
 from ...core.settings import DEFAULT_PROVIDERS, ProviderSetting, ValhallaSettings
 from ...global_definitions import (
@@ -32,11 +37,17 @@ from ...global_definitions import (
 from ...gui.widgets.costing_settings.widget_settings_valhalla_base import (
     ValhallaSettingsBase,
 )
+from ...third_party.routingpy import routingpy
+from ...third_party.routingpy.routingpy.utils import decode_polyline6
 from ...utils.geom_utils import WGS84
 from ...utils.layer_utils import get_wgs_coords_from_layer
+from ...utils.logger_utils import qgis_log
 from ...utils.misc_utils import wrap_in_html_tag
 from ...utils.resource_utils import get_icon
 from ..processing_definitions import HELP_DIR
+
+# Valhalla's error for a linear_cost_factors line it can't edge-walk
+LINE_NOT_MATCHED = 233
 
 
 class ValhallaBaseAlgorithm(QgsProcessingAlgorithm):
@@ -47,6 +58,12 @@ class ValhallaBaseAlgorithm(QgsProcessingAlgorithm):
     IN_MODE = "INPUT_MODE"
     IN_AVOID_LOCATIONS = "INPUT_AVOID_LOCATIONS"
     IN_AVOID_POLYGONS = "INPUT_AVOID_POLYGONS"
+    IN_POINT_BARRIERS = "INPUT_POINT_BARRIERS"
+    IN_POINT_BARRIER_FIELD = "INPUT_POINT_BARRIER_FIELD"
+    IN_POINT_BARRIER_COST = "INPUT_POINT_BARRIER_COST"
+    IN_POLYGON_BARRIERS = "INPUT_POLYGON_BARRIERS"
+    IN_POLYGON_BARRIER_FIELD = "INPUT_POLYGON_BARRIER_FIELD"
+    IN_POLYGON_BARRIER_FACTOR = "INPUT_POLYGON_BARRIER_FACTOR"
     IN_1 = "INPUT_LAYER_1"
     IN_FIELD_1 = "INPUT_FIELD_1"
 
@@ -153,6 +170,7 @@ class ValhallaBaseAlgorithm(QgsProcessingAlgorithm):
                 avoid_polygons_param.flags() | QgsProcessingParameterDefinition.Flag.FlagAdvanced
             )
             self.addParameter(avoid_polygons_param)
+            self.init_barrier_params()
             self.setup_costing_options()
 
         input_layer_desc = f"Input point layer{' 1' if multi_layer else ''}"
@@ -179,6 +197,151 @@ class ValhallaBaseAlgorithm(QgsProcessingAlgorithm):
             createByDefault=True,
         )
         self.addParameter(output_param)
+
+    def init_barrier_params(self):
+        """Added-cost point barriers and scaled-cost polygon barriers, all advanced."""
+        advanced = QgsProcessingParameterDefinition.Flag.FlagAdvanced
+        for (
+            layer_name,
+            layer_desc,
+            layer_type,
+            field_name,
+            field_desc,
+            value_name,
+            value_desc,
+            default,
+            minimum,
+        ) in (
+            (
+                self.IN_POINT_BARRIERS,
+                "Point barriers: crossing one adds a cost",
+                QgsProcessing.SourceType.TypeVectorPoint,
+                self.IN_POINT_BARRIER_FIELD,
+                "Point barrier added cost field (about seconds)",
+                self.IN_POINT_BARRIER_COST,
+                "Point barrier added cost, if no field (about seconds)",
+                300.0,
+                0.0,
+            ),
+            (
+                self.IN_POLYGON_BARRIERS,
+                "Polygon barriers: roads inside cost a factor more",
+                QgsProcessing.SourceType.TypeVectorPolygon,
+                self.IN_POLYGON_BARRIER_FIELD,
+                "Polygon barrier factor field",
+                self.IN_POLYGON_BARRIER_FACTOR,
+                "Polygon barrier factor, if no field (e.g. 2 = twice the cost)",
+                2.0,
+                0.0,
+            ),
+        ):
+            layer = QgsProcessingParameterFeatureSource(
+                layer_name, layer_desc, [layer_type], optional=True
+            )
+            layer.setHelp(
+                "Valhalla uses the barriers to choose the path, but reports durations and costs "
+                "without them: a barrier not worth a detour changes nothing you can see."
+            )
+            barrier_field = QgsProcessingParameterField(
+                field_name,
+                field_desc,
+                parentLayerParameterName=layer_name,
+                type=QgsProcessingParameterField.DataType.Numeric,
+                optional=True,
+            )
+            value = QgsProcessingParameterNumber(
+                value_name,
+                value_desc,
+                type=QgsProcessingParameterNumber.Type.Double,
+                defaultValue=default,
+                minValue=minimum,
+            )
+            for param in (layer, barrier_field, value):
+                param.setFlags(param.flags() | advanced)
+                self.addParameter(param)
+
+    def get_barrier_factors(  # noqa: C901 - three small request helpers inside
+        self, parameters, context, results_factory, options: dict
+    ) -> List[dict]:
+        """
+        The barriers as Valhalla ``linear_cost_factors``. Costs a few requests per barrier:
+        an expansion around it, and for points a short route to price the stretch.
+        """
+        router = results_factory.router
+
+        def expand(point, meters):
+            try:
+                result = router.request(
+                    RouterEndpoint.EXPANSION,
+                    list(point),
+                    intervals=[meters],
+                    interval_type="distance",
+                    expansion_properties=["edge_id", "pred_edge_id"],
+                    options=options,
+                )
+            except (routingpy.exceptions.RouterApiError, routingpy.exceptions.RouterServerError) as e:
+                raise QgsProcessingException(f"Barrier lookup, HTTP {e.status}: {e.message}")
+            return result.raw.get("features", []) if result.raw else []
+
+        def cost(a, b):
+            try:
+                result = router.request(RouterEndpoint.DIRECTIONS, [list(a), list(b)], options=options)
+            except (routingpy.exceptions.RouterApiError, routingpy.exceptions.RouterServerError):
+                return None
+            return result.raw["trip"]["summary"]["cost"] if result.raw else None
+
+        def values(layer_name, field_name, default_name):
+            source = self.parameterAsSource(parameters, layer_name, context)
+            if source is None:
+                return
+            field = self.parameterAsString(parameters, field_name, context)
+            default = self.parameterAsDouble(parameters, default_name, context)
+            transform = QgsCoordinateTransform(source.sourceCrs(), WGS84, context.transformContext())
+            for feat in source.getFeatures():
+                if not feat.hasGeometry():
+                    continue
+                value = feat[field] if field else default
+                if value is None or (hasattr(value, "isNull") and value.isNull()):
+                    value = default
+                geom = QgsGeometry(feat.geometry())
+                geom.transform(transform)
+                yield geom, float(value)
+
+        factors: List[dict] = list()
+        for geom, added in values(
+            self.IN_POINT_BARRIERS, self.IN_POINT_BARRIER_FIELD, self.IN_POINT_BARRIER_COST
+        ):
+            for part in geom.asMultiPoint() if geom.isMultipart() else [geom.asPoint()]:
+                factors += point_barrier_lines((part.x(), part.y()), added, expand, cost)
+        for geom, factor in values(
+            self.IN_POLYGON_BARRIERS, self.IN_POLYGON_BARRIER_FIELD, self.IN_POLYGON_BARRIER_FACTOR
+        ):
+            factors += polygon_barrier_lines(geom, factor, expand)
+
+        def matches(lines: List[dict]) -> bool:
+            """Whether Valhalla takes these lines: a tiny route along the first one carries them."""
+            ends = decode_polyline6(lines[0]["shape"])
+            try:
+                router.request(
+                    RouterEndpoint.DIRECTIONS,
+                    [list(ends[0]), list(ends[-1])],
+                    options=options,
+                    linear_cost_factors=lines,
+                )
+            except routingpy.exceptions.RouterApiError as e:
+                if isinstance(e.message, dict) and e.message.get("error_code") == LINE_NOT_MATCHED:
+                    return False
+                raise QgsProcessingException(f"Barrier check, HTTP {e.status}: {e.message}")
+            return True
+
+        factors, dropped = drop_unmatched(factors, matches)
+        if dropped:
+            qgis_log(
+                f"{dropped} barrier road pieces were left out: Valhalla couldn't match them to its roads",
+                Qgis.MessageLevel.Warning,
+            )
+
+        return factors
 
     def get_base_params(self, parameters, context):
         provider: ProviderSetting = self.providers[
@@ -228,6 +391,13 @@ class ValhallaBaseAlgorithm(QgsProcessingAlgorithm):
         #         }
         #     )
         results_factory = ResultsFactory(**factory_args)
+
+        if self.router == RouterType.VALHALLA and self.WITH_COSTING_OPTIONS:
+            if barrier_factors := self.get_barrier_factors(
+                parameters, context, results_factory, params["options"]
+            ):
+                # alongside any linear_cost_factors already there (e.g. map matched lines)
+                params["linear_cost_factors"] = params.get("linear_cost_factors", []) + barrier_factors
 
         return layer_1, layer_field_name_1, params, results_factory
 

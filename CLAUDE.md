@@ -418,13 +418,28 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   (`identity_keep`), so the VRP output code writes them unchanged. The hooks that make this a
   subclass: `_read_extra` (landfills appended to `problem.coords` before the matrices) and
   `_solve`. Tests: `test_multi_trip.py` (real VROOM, no valhalla), `test_waste.py` (Andorra).
-- **`linear_cost_factors` (PR #80, future cost barriers) — how Valhalla 3.9.1 behaves**: the factor
-  IS used when choosing the path, but the reported `summary.cost`/`time` (and the matrix time)
-  leave the penalty out. So a penalty too small to make a detour worthwhile changes nothing you
-  can see, which looks like "ignored" (verified: on CG-2 the switch to a 1218 s detour came at
-  factor ~36.5 for a 36.6 s stretch, predicted 34.3). Also: factors below
-  `service_limits.min_linear_cost_factor` (1 by default) are raised to it, and matched pieces
-  under 1 m are dropped. Barriers built on it must add their own penalty to reported costs.
+- **`linear_cost_factors` — how Valhalla 3.9.1 behaves** (PR #80 and the cost barriers rely on
+  it): the factor IS used when choosing the path, but the reported `summary.cost`/`time` (and the
+  matrix time) leave the penalty out, so a penalty not worth a detour changes nothing visible
+  (verified: on CG-2 the switch to a 1218 s detour came at factor ~36.5 for a 36.6 s stretch,
+  predicted 34.3). Factors below `service_limits.min_linear_cost_factor` (1 by default) are
+  raised to it; matched pieces under 1 m are dropped; a line that doesn't edge-walk fails the
+  whole request with error 233 (newer Valhalla only warns, valhalla#6443).
+- **Cost barriers** (`core/barriers.py`, params in `ValhallaBaseAlgorithm.init_barrier_params`, so
+  every Valhalla algorithm with costing options has them, VRP/waste included): added-cost point
+  barriers and scaled-cost polygon barriers, turned into `linear_cost_factors` in
+  `get_base_params` (appended to any already there, e.g. PR #80's lines). The roads come from
+  `/expansion` (exact edge shapes, `pred_edge_id == 2**46 - 1` = the edges it starts on):
+  - point: each starting edge = the piece from the point to the next node, one per direction;
+    factor = 1 + added / that piece's route cost, so passing the point costs `added` more.
+  - polygon: expansion from `pointOnSurface` past the farthest vertex, clipped to the polygon,
+    orientation restored (one-ways only edge-walk forwards), deduped.
+  - **one edge per line, never chained**: joined expansion edges can fail to edge-walk (it steps
+    between hierarchy levels). Still ~5% of single edges don't walk (e.g. some parking aisles),
+    unpredictably, so `drop_unmatched` bisects with tiny /route requests carrying the lines and
+    drops the bad ones (logged); all-good costs one request.
+  - Reported durations/costs exclude the penalties, as in Valhalla itself (unlike ArcGIS).
+
 - **Dock** (`gui/vrp_run.py`, menu key `FleetProblem.VRP`, page `ui_vrp_params` built in code in
   `_build_vrp_page`): the waypoint table's `VRP` kind (role job/vehicle, name, amount = delivery or
   capacity, minutes of service, From/To as HH:MM = time window or shift, skills, vehicle mode).
