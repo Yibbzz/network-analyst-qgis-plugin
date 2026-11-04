@@ -418,12 +418,13 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   (`identity_keep`), so the VRP output code writes them unchanged. The hooks that make this a
   subclass: `_read_extra` (landfills appended to `problem.coords` before the matrices) and
   `_solve`. Tests: `test_multi_trip.py` (real VROOM, no valhalla), `test_waste.py` (Andorra).
-- **Cost barriers are NOT built on `linear_cost_factors` (yet)**: on Valhalla 3.9.1 /route sometimes
-  ignores a factor on part of a road (e.g. factor 10 on 5 edges of CG-2: no change, factor 1000:
-  detour) while /sources_to_targets honours it; factors on a single short edge or < 1
-  (`min_linear_cost_factor` = 1 by default) do nothing. Repro: route A→B, edge-walk its shape with
-  /trace_attributes, factor the shape between edges i-2..i+2, route again. Revisit added-cost
-  point / scaled-cost polygon barriers once that's understood upstream.
+- **`linear_cost_factors` (PR #80, future cost barriers) — how Valhalla 3.9.1 behaves**: the factor
+  IS used when choosing the path, but the reported `summary.cost`/`time` (and the matrix time)
+  leave the penalty out. So a penalty too small to make a detour worthwhile changes nothing you
+  can see, which looks like "ignored" (verified: on CG-2 the switch to a 1218 s detour came at
+  factor ~36.5 for a 36.6 s stretch, predicted 34.3). Also: factors below
+  `service_limits.min_linear_cost_factor` (1 by default) are raised to it, and matched pieces
+  under 1 m are dropped. Barriers built on it must add their own penalty to reported costs.
 - **Dock** (`gui/vrp_run.py`, menu key `FleetProblem.VRP`, page `ui_vrp_params` built in code in
   `_build_vrp_page`): the waypoint table's `VRP` kind (role job/vehicle, name, amount = delivery or
   capacity, minutes of service, From/To as HH:MM = time window or shift, skills, vehicle mode).
