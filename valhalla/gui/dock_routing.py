@@ -21,12 +21,15 @@ from qgis.PyQt.QtCore import QProcess, QSize, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QIcon, QKeySequence, QPainter, QPalette, QPixmap
 from qgis.PyQt.QtWidgets import (
     QAction,
+    QCheckBox,
+    QFormLayout,
     QFrame,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QShortcut,
+    QSpinBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -61,7 +64,9 @@ from . import UI_RESOURCE_PATH
 from .dlg_about import AboutDialog
 from .gui_utils import add_msg_bar
 from .spopt_run import SpoptRun, matrix_layer, split_waypoints
-from .widgets.waypoint_model import ROUTING, SPOPT, Waypoint, WaypointTableKind
+from .vrp_run import FleetProblem, VrpRun
+from .vrp_run import split_waypoints as split_vrp_waypoints
+from .widgets.waypoint_model import ROUTING, SPOPT, VRP, Waypoint, WaypointTableKind
 from .widgets.widget_router import PROFILE_TO_UI, RouterWidget
 from .widgets.widget_routing_params import RoutingParamsWidget
 from .widgets.widget_waypoints import WaypointsWidget
@@ -71,7 +76,7 @@ GENERATED_FORM_CLASS, _ = uic.loadUiType(str(UI_RESOURCE_PATH / "widget_routing_
 
 @dataclass(frozen=True)
 class MenuEntry:
-    endpoint_key: Union[RouterEndpoint, SpoptProblem]
+    endpoint_key: Union[RouterEndpoint, SpoptProblem, FleetProblem]
     window_title: str  # the window title's suffix
     tooltip: str
     icon: str
@@ -143,6 +148,15 @@ MENU: Tuple[Optional[MenuEntry], ...] = (
         "ui_spopt_params",
         SPOPT,
     ),
+    None,
+    MenuEntry(
+        FleetProblem.VRP,
+        "Vehicle Routing",
+        "Vehicle Routing Problem (VRP): assign jobs to a fleet of vehicles and order their stops",
+        "vrp_icon.svg",
+        "ui_vrp_params",
+        VRP,
+    ),
 )
 
 HELP_URL = "https://github.com/nilsnolde/valhalla-qgis-plugin?tab=readme-ov-file#how-to"
@@ -164,6 +178,9 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
         self.endpoint = ""
         # the spatial optimization running in the background, one at a time
         self.spopt_run: Optional[SpoptRun] = None
+        # the vehicle routing running in the background, one at a time
+        self.vrp_run: Optional[VrpRun] = None
+        self._build_vrp_page()
 
         # make sure we have some default settings:
         # - at least one remote HTTP API URL and localhost
@@ -422,6 +439,8 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
         try:
             if isinstance(entry.endpoint_key, SpoptProblem):
                 self._execute_spopt(entry.endpoint_key)
+            elif isinstance(entry.endpoint_key, FleetProblem):
+                self._execute_vrp()
             else:
                 self._execute_routing(entry.endpoint_key)
         except routingpy.exceptions.RouterError as e:  # HTTP error
@@ -511,6 +530,72 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
             self.status_bar.pushCritical(f"{problem.value.upper()} failed", error)
         elif not layers:
             self.status_bar.pushInfo("Canceled", f"{problem.value.upper()} was canceled")
+        else:
+            self.status_bar.clearWidgets()
+        for layer in layers:
+            QgsProject.instance().addMapLayer(layer)
+
+    def _build_vrp_page(self):
+        """The VRP parameters page; the jobs & vehicles are the waypoint table's VRP kind."""
+        page = QWidget()
+        page.setObjectName("ui_vrp_params")
+        form = QFormLayout(page)
+        self.ui_vrp_return = QCheckBox("Vehicles return to their start")
+        self.ui_vrp_return.setChecked(True)
+        form.addRow(self.ui_vrp_return)
+        self.ui_vrp_exploration = QSpinBox()
+        self.ui_vrp_exploration.setRange(1, 5)
+        self.ui_vrp_exploration.setValue(5)
+        self.ui_vrp_exploration.setToolTip("1 is fastest, 5 finds the best routes")
+        form.addRow("Solver effort", self.ui_vrp_exploration)
+        self.ui_vrp_timeout = QSpinBox()
+        self.ui_vrp_timeout.setRange(0, 3600)
+        self.ui_vrp_timeout.setSuffix(" s")
+        self.ui_vrp_timeout.setSpecialValueText("none")
+        self.ui_vrp_timeout.setToolTip("Stop the solver after this long and keep its best routes")
+        form.addRow("Time limit", self.ui_vrp_timeout)
+        self.ui_params_stacked.addWidget(page)
+        self.ui_vrp_params = page
+
+    def _execute_vrp(self):
+        """The solve runs in the background, matrices and routes included."""
+        if self.vrp_run is not None:
+            self.status_bar.pushInfo("Busy", "A vehicle routing problem is still being solved")
+            return
+        if not pypi.is_installed(pypi.VROOM_PKG):
+            self.status_bar.pushWarning(
+                "Missing dependency", "Install pyvroom in the plugin settings' dependencies first"
+            )
+            return
+
+        jobs, vehicles = split_vrp_waypoints(self.waypoints_widget.table_models[VRP.name].waypoints)
+        if not jobs or not vehicles:
+            self.status_bar.pushWarning("Missing points", "Add at least one job and one vehicle")
+            return
+
+        self.vrp_run = VrpRun(
+            jobs,
+            vehicles,
+            provider_url=self.router_widget.provider.url,
+            profile=self.router_widget.profile,
+            request_params=self._get_params(RouterEndpoint.MATRIX),
+            return_to_start=self.ui_vrp_return.isChecked(),
+            exploration_level=self.ui_vrp_exploration.value(),
+            timeout=self.ui_vrp_timeout.value(),
+            on_done=self._on_vrp_done,
+        )
+        self.vrp_run.start()
+        self.status_bar.pushInfo("Solving", "The VRP runs in the background, see the task manager")
+
+    def _on_vrp_done(self, layers: List[QgsMapLayer], error: Optional[str]):
+        warnings = self.vrp_run.warnings
+        self.vrp_run = None
+        if error:
+            self.status_bar.pushCritical("VRP failed", error)
+        elif not layers:
+            self.status_bar.pushInfo("Canceled", "The VRP was canceled")
+        elif warnings:
+            self.status_bar.pushWarning("VRP", " ".join(warnings))
         else:
             self.status_bar.clearWidgets()
         for layer in layers:
@@ -712,6 +797,8 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
 
         if self.spopt_run is not None:
             self.spopt_run.cancel()
+        if self.vrp_run is not None:
+            self.vrp_run.cancel()
 
         self.waypoints_widget.unload()
 

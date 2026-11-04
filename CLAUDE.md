@@ -408,6 +408,19 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   Breaks not listed in the steps are silently dropped by VROOM, so they're left out with a warning.
 - Tests: `test_vrp_problem.py` (no valhalla), `test_vroom.py` (the runner), and the algorithm
   against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
+- **Dock** (`gui/vrp_run.py`, menu key `FleetProblem.VRP`, page `ui_vrp_params` built in code in
+  `_build_vrp_page`): the waypoint table's `VRP` kind (role job/vehicle, name, amount = delivery or
+  capacity, minutes of service, From/To as HH:MM = time window or shift, skills, vehicle mode).
+  `VrpRun` turns the table into two memory layers and runs the algorithm in a
+  `QgsProcessingAlgRunnerTask`. Unlike spopt nothing is requested synchronously: the matrices are
+  part of the algorithm, so the dock passes its provider URL, travel mode and request params by
+  subclassing the algorithm's `get_base_params` (`DockVrp`) instead of mapping them onto
+  Processing parameters. Amounts all 0 = no capacities; a vehicle's 0 capacity = none (an error
+  if jobs have amounts). Routes and stops get one color per vehicle (`style_by_vehicle`).
+  Non-fatal warnings (unreachable jobs) come back in `VrpRun.warnings`. Test:
+  `tests/test_localhost_docker/test_gui/test_vrp_run.py`.
+- Layer imports into a TEXT column turn QTime/QDateTime into `HH:mm:ss` (`_from_field`), not
+  Python's repr — the VRP's From/To columns read that.
 
 ## Waypoint table: one model, a column schema per kind (`gui/widgets/waypoint_model.py`)
 

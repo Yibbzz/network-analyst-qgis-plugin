@@ -203,7 +203,99 @@ SPOPT = WaypointTableKind(
     ),
 )
 
-KINDS = {k.name: k for k in (ROUTING, SPOPT)}
+
+@unique
+class VrpRole(str, Enum):
+    JOB = "job"
+    VEHICLE = "vehicle"
+
+
+def _is_vrp_role(role: VrpRole) -> Callable[[Dict[str, Any]], bool]:
+    return lambda attrs: attrs.get("role") == role.value
+
+
+# "default" = the travel mode selected in the dock
+VRP_MODES = ("default", "auto", "truck", "bus", "bicycle", "pedestrian", "motorcycle")
+_TIME_TIP = "as HH:MM, empty for none"
+VRP = WaypointTableKind(
+    name="vrp",
+    columns=(
+        Column(
+            "role",
+            "Type",
+            ColumnKind.CHOICE,
+            VrpRole.JOB.value,
+            "A job to serve, or a vehicle starting (and ending) here",
+            tuple(r.value for r in VrpRole),
+        ),
+        Column("name", "Name", ColumnKind.TEXT, "", "Carried over to the results, names the vehicles"),
+        Column(
+            "amount",
+            "Amount",
+            ColumnKind.INT,
+            0,
+            "A job's delivery amount, a vehicle's capacity; leave all 0 to ignore capacities",
+            maximum=1e9,
+        ),
+        Column(
+            "service",
+            "Minutes",
+            ColumnKind.FLOAT,
+            0.0,
+            "Service time: minutes spent at the job",
+            maximum=1e6,
+            applies=_is_vrp_role(VrpRole.JOB),
+        ),
+        Column(
+            "start",
+            "From",
+            ColumnKind.TEXT,
+            "",
+            f"A job's earliest arrival, a vehicle's shift start, {_TIME_TIP}",
+        ),
+        Column(
+            "end",
+            "To",
+            ColumnKind.TEXT,
+            "",
+            f"A job's latest arrival, a vehicle's shift end, {_TIME_TIP}",
+        ),
+        Column(
+            "skills",
+            "Skills",
+            ColumnKind.TEXT,
+            "",
+            "Comma separated integers: a job's required skills, a vehicle's skills",
+        ),
+        Column(
+            "mode",
+            "Mode",
+            ColumnKind.CHOICE,
+            VRP_MODES[0],
+            "The vehicle's travel mode, 'default' is the one selected above",
+            VRP_MODES,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+        ),
+    ),
+    ann_layer_name=f"{PLUGIN_NAME} Jobs & Vehicles",
+    marker=lambda _, __, wp: (
+        "vehicle.svg" if wp.attrs.get("role") == VrpRole.VEHICLE.value else "demand.svg"
+    ),
+    add_modes=(
+        AddMode("job", "jobs", {"role": VrpRole.JOB.value}),
+        AddMode("vehicle", "vehicles", {"role": VrpRole.VEHICLE.value}),
+    ),
+    layer_fields=(
+        LayerField("name", "Name"),
+        LayerField("amount", "Amount / capacity", numeric=True),
+        LayerField("service", "Service (minutes)", numeric=True),
+        LayerField("start", "From (HH:MM)"),
+        LayerField("end", "To (HH:MM)"),
+        LayerField("skills", "Skills"),
+    ),
+)
+
+KINDS = {k.name: k for k in (ROUTING, SPOPT, VRP)}
 
 
 class WaypointTableModel(QAbstractTableModel):

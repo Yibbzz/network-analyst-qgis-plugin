@@ -19,7 +19,7 @@ from qgis.core import (
     QgsUnitTypes,
 )
 from qgis.gui import QgisInterface, QgsMapTool
-from qgis.PyQt.QtCore import QPointF, QSize
+from qgis.PyQt.QtCore import QDateTime, QPointF, QSize, QTime
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QAction,
@@ -213,6 +213,11 @@ def _from_field(column: Column, value: Any) -> Any:
             return int(value)
         if column.kind == ColumnKind.FLOAT:
             return float(value)
+        # a time (of day) as text the VRP's HH:MM columns read, not Python's repr
+        if isinstance(value, QTime):
+            return value.toString("HH:mm:ss")
+        if isinstance(value, QDateTime):
+            return value.time().toString("HH:mm:ss")
         return str(value)
     except (TypeError, ValueError):
         return None
