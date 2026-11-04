@@ -85,32 +85,40 @@ class TestPyPi(unittest.TestCase):
         """A python3.12 that only lives on $PATH must be found (range() excludes its stop)."""
         self.assertEqual(min(pypi._PY_MINORS), pypi._PY_FLOOR[1])
 
-    def test_spopt_python_marker(self):
-        """A spopt tree only counts as installed for the python it was installed for."""
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            dist_info = root.joinpath("spopt-0.7.0.dist-info")
-            dist_info.mkdir()
-            dist_info.joinpath("METADATA").write_text(
-                "Metadata-Version: 2.1\nName: spopt\nVersion: 0.7.0\n"
-            )
+    def test_check_state_without_available_vroom(self):
+        self.assertNotEqual(pypi.check_state(pypi.VROOM_PKG, None), pypi.PyPiState.UPGRADEABLE)
 
-            pypi.spopt_root_dir, real_root = lambda: root, pypi.spopt_root_dir
-            try:
-                marker = root.joinpath(pypi._SPOPT_PY_MARKER)
-                self.assertIsNone(pypi.installed_version(pypi.SPOPT_PKG))  # no marker
+    def test_tree_python_marker(self):
+        """A spopt/pyvroom tree only counts as installed for the python it was installed for."""
+        for pkg, root_fn, version in (
+            (pypi.SPOPT_PKG, "spopt_root_dir", "0.7.0"),
+            (pypi.VROOM_PKG, "vroom_root_dir", "1.15.2"),
+        ):
+            with self.subTest(pkg=pkg.pypi_name), TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                dist_info = root.joinpath(f"{pkg.pypi_name}-{version}.dist-info")
+                dist_info.mkdir()
+                dist_info.joinpath("METADATA").write_text(
+                    f"Metadata-Version: 2.1\nName: {pkg.pypi_name}\nVersion: {version}\n"
+                )
 
-                major, minor = pypi.python_version()
-                marker.write_text(f"{major}.{minor}")
-                self.assertEqual(pypi.installed_version(pypi.SPOPT_PKG), "0.7.0")
+                real_root = getattr(pypi, root_fn)
+                setattr(pypi, root_fn, lambda: root)
+                try:
+                    marker = root.joinpath(pypi._TREE_PY_MARKER)
+                    self.assertIsNone(pypi.installed_version(pkg))  # no marker
 
-                marker.write_text(f"{major}.{minor + 1}")  # interpreter changed
-                self.assertIsNone(pypi.installed_version(pypi.SPOPT_PKG))
+                    major, minor = pypi.python_version()
+                    marker.write_text(f"{major}.{minor}")
+                    self.assertEqual(pypi.installed_version(pkg), version)
 
-                marker.write_text("garbage")
-                self.assertIsNone(pypi.installed_version(pypi.SPOPT_PKG))
-            finally:
-                pypi.spopt_root_dir = real_root
+                    marker.write_text(f"{major}.{minor + 1}")  # interpreter changed
+                    self.assertIsNone(pypi.installed_version(pkg))
+
+                    marker.write_text("garbage")
+                    self.assertIsNone(pypi.installed_version(pkg))
+                finally:
+                    setattr(pypi, root_fn, real_root)
 
     def test_check_state_not_installed(self):
         self.assertEqual(pypi.check_state(BOGUS_PKG, Version("1.0.0")), pypi.PyPiState.NOT_INSTALLED)

@@ -367,6 +367,38 @@ Decisions behind the design:
   `QgsApplication` exits fine). Tests load the GeoJSON fixtures into **memory layers** with stdlib
   json (`spopt_base.load_geojson`) instead.
 
+## Vehicle routing (VRP) with pyvroom — Processing algorithm done, dock not yet
+
+`valhalla:valhalla_vrp_<profile>` (group "Vehicle Routing", `processing/vehicle_routing/vrp.py`):
+jobs (the base class' `IN_1`) + a vehicles point layer (start depots) → one Valhalla matrix between
+all locations → VROOM (out of process) → one Valhalla route per vehicle for its line. Outputs:
+routes (lines, vehicle attributes copied), stops (every step incl. start/break/end, job attributes
+copied), unassigned (reason `unreachable` or `not assigned`).
+
+- **Same machinery as spopt**: `core/vroom/runner.py` owns the protocol (stdlib-only at module
+  level), `core/vroom/__init__.py` is the client (`solve(problem, …, is_canceled)` → VROOM's
+  solution JSON or None if canceled, `VroomError` with stderr as `.detail`). pyvroom is installed
+  by `pypi._install_tree` into `<profile>/valhalla/vroom` (numpy + pandas, ~170 MB, per-version
+  wheels → same `.python_version` marker logic as spopt, `_tree_python`).
+- **The protocol is VROOM's own JSON** (input with `matrices`, output as VROOM writes it), so the
+  runner knows nothing about jobs/vehicles. VROOM never calls Valhalla: the matrix comes from the
+  algorithm's provider + costing options like every other algorithm.
+- **Server limits**: Valhalla's defaults are 2500 matrix pairs and 20 route locations per request.
+  The matrix is requested in chunks of source rows (`matrix_row_chunks`), route lines in chunks
+  that share their end/start stop (`route_chunks`); both limits are advanced parameters.
+- **Unroutable cells**: a job no vehicle can get to (and back from, if returning) is left out of
+  the problem and reported `unreachable`; any other NULL cell becomes `UNROUTABLE` (~115 days).
+- **IDs**: vehicle i / job k get VROOM id i / k (list positions); VROOM's `location_index` points
+  into the submatrix `keep` that `build_vroom_problem` returns.
+- **Attributes**: times = seconds, `HH:MM[:SS]`, QTime (from midnight) or QDateTime (epoch) — one
+  kind per run; amounts/skills = a number or comma separated numbers; missing amount dimensions
+  are padded with 0; amounts without a vehicle capacity are an error, not silently dropped.
+- Pure helpers are module-level functions, tested without valhalla in
+  `tests/test_localhost_plugin/test_utils/test_vrp_problem.py`; the runner in `…/test_vroom.py`;
+  the algorithm against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
+- Not yet: dock integration (a `TableKind`), shipments (pickup-and-delivery pairs), mixed-profile
+  fleets, re-solving with fixed assignments (Update Fleet Routing).
+
 ## Waypoint table: one model, a column schema per kind (`gui/widgets/waypoint_model.py`)
 
 The dock's waypoint table is model/view, not `QTableWidget` + cell widgets:

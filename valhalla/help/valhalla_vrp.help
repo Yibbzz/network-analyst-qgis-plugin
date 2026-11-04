@@ -1,0 +1,14 @@
+The <b>Vehicle Routing Problem</b> (VRP) algorithm assigns jobs to a fleet of vehicles and puts each vehicle's jobs in order, solved by <a href="https://github.com/VROOM-Project/vroom">VROOM</a> on a Valhalla time and distance matrix. Install <i>pyvroom</i> in the plugin settings first.
+
+<b>Jobs</b> are a point layer of stops. Optional fields set each job's service time (seconds), delivery and pickup amounts, a time window, required skills and a priority (0 to 100).
+<b>Vehicles</b> are a point layer of where each vehicle starts. Optional fields set its capacity, shift, skills, maximum number of jobs and one break (window and duration in seconds). Vehicles return to their start unless you untick it.
+
+Amounts can have several dimensions as comma separated numbers, e.g. "500, 2" for kilograms and pallets; all jobs and vehicles must use the same order. Skills are comma separated integers: a job only goes to a vehicle with all its skills.
+Times are seconds, "HH:MM[:SS]" text, or time / date-time fields (from midnight / the Unix epoch). Use one kind for all times in a run.
+
+Outputs:
+  1. <i>routes</i>: one line per used vehicle with its number of jobs, travel duration and distance, service and waiting time, start and end time,
+  2. <i>stops</i>: every step in order (start, jobs, breaks, end) with arrival, departure, waiting and load after the step,
+  3. <i>unassigned</i>: jobs no vehicle could take, either <i>unreachable</i> on the network or <i>not assigned</i> by the solver (capacity, time windows, skills).
+
+The matrix and the route lines respect your Valhalla server's limits (<i>Advanced Parameters</i>): 2500 matrix pairs and 20 route locations per request are Valhalla's defaults. VROOM uses one fixed matrix, so travel times don't change with the time of day.
