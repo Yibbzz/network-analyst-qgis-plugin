@@ -367,7 +367,7 @@ Decisions behind the design:
   `QgsApplication` exits fine). Tests load the GeoJSON fixtures into **memory layers** with stdlib
   json (`spopt_base.load_geojson`) instead.
 
-## Vehicle routing (VRP) with pyvroom — Processing algorithm done, dock not yet
+## Vehicle routing (VRP) with pyvroom
 
 `valhalla:valhalla_vrp_<profile>` (group "Vehicle Routing", `processing/vehicle_routing/vrp.py`):
 jobs (the base class' `IN_1`) + a vehicles point layer (start depots) → one Valhalla matrix between
@@ -393,11 +393,21 @@ copied), unassigned (reason `unreachable` or `not assigned`).
 - **Attributes**: times = seconds, `HH:MM[:SS]`, QTime (from midnight) or QDateTime (epoch) — one
   kind per run; amounts/skills = a number or comma separated numbers; missing amount dimensions
   are padded with 0; amounts without a vehicle capacity are an error, not silently dropped.
-- Pure helpers are module-level functions, tested without valhalla in
-  `tests/test_localhost_plugin/test_utils/test_vrp_problem.py`; the runner in `…/test_vroom.py`;
-  the algorithm against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
-- Not yet: dock integration (a `TableKind`), shipments (pickup-and-delivery pairs), mixed-profile
-  fleets, re-solving with fixed assignments (Update Fleet Routing).
+- **The problem as plain data** is `processing/vehicle_routing/problem.py` (`Problem`/`Vehicle`/
+  `Job`, attribute parsing, `build_vroom_problem`, request chunking), no layers or Valhalla; blank
+  text counts as NULL (CSV columns). `vrp.py` is the Processing algorithm on top of it.
+- **Mixed fleets**: a vehicle travel mode field; one matrix per profile in the fleet
+  (`Matrices = {profile: (durations, distances)}`), routes drawn with the vehicle's profile.
+  The algorithm's costing options only apply to its own profile (`_profile_params`).
+- **Shipments**: two jobs sharing a shipment ID with roles pickup/delivery become one VROOM
+  shipment; pickup id k and delivery id k' are their job positions, like plain jobs.
+- **Assigned vehicle (locks)**: VROOM can't pin a job to a vehicle, so every vehicle gets its own
+  skill `LOCK_SKILL_BASE + i` and a locked job requires it. IDs compare as text.
+- **Keep the order (plan mode)**: vehicles get VROOM `steps` from the sequence field and the runner
+  calls `Input.check()` instead of `solve()` (`SolveRequest.plan`): times + `violations` only.
+  Breaks not listed in the steps are silently dropped by VROOM, so they're left out with a warning.
+- Tests: `test_vrp_problem.py` (no valhalla), `test_vroom.py` (the runner), and the algorithm
+  against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
 
 ## Waypoint table: one model, a column schema per kind (`gui/widgets/waypoint_model.py`)
 

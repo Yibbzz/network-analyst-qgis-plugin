@@ -1,17 +1,15 @@
 """
 Vehicle routing (VRP) with VROOM on Valhalla cost matrices.
 
-Valhalla supplies one time/distance matrix between all vehicle starts and jobs, VROOM
-(core/vroom, out of process) assigns and orders the jobs, and Valhalla routes each
-vehicle's stops to draw its line. VROOM never talks to Valhalla itself: the matrix is
-requested through the plugin's own provider + costing options, like every other algorithm.
+Valhalla supplies a time/distance matrix between all vehicle starts and jobs (one per travel
+mode in the fleet), VROOM (core/vroom, out of process) assigns and orders the jobs, and
+Valhalla routes each vehicle's stops to draw its line. VROOM never talks to Valhalla itself:
+the matrices are requested through the plugin's own provider + costing options, like every
+other algorithm. The problem as plain data lives in problem.py.
 """
 
-import re
-from dataclasses import dataclass, field
-from datetime import datetime, time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from qgis.core import (
     QgsFeature,
@@ -32,7 +30,7 @@ from qgis.core import (
     QgsProcessingParameterNumber,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QDateTime, QTime, QVariant
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtGui import QIcon
 
 from ...core import vroom
@@ -46,18 +44,34 @@ from ...utils.resource_utils import get_icon
 from ..processing_definitions import HELP_DIR
 from ..routing.base_algorithm import ValhallaBaseAlgorithm
 from ..spatial_optimization.base_algorithm import SpoptBaseAlgorithm
+from .problem import (
+    Job,
+    Matrices,
+    Problem,
+    Vehicle,
+    build_vroom_problem,
+    is_null,
+    matrix_row_chunks,
+    route_chunks,
+    seconds_to_hms,
+    time_window,
+    to_amount,
+    to_int,
+    to_profile,
+    to_role,
+    to_seconds,
+    to_skills,
+    unreachable_jobs,
+)
 
-# an open time window end; VROOM's times are uint32, keep clear of overflows when it adds up
-OPEN_END = 2**31 - 1
-# the cost of a matrix cell Valhalla couldn't route (~115 days), so VROOM avoids it
-UNROUTABLE = 10_000_000
-_TIME_RE = re.compile(r"^\s*(\d{1,3}):(\d{2})(?::(\d{2}))?\s*$")
+JOB_STEPS = ("job", "pickup", "delivery")
 
 
 class FieldNames:
     """The VRP outputs' result fields."""
 
     VEHICLE_ID = "vehicle_id"
+    PROFILE = "profile"
     SEQUENCE = "sequence"
     TYPE = "type"
     ARRIVAL = "arrival"
@@ -73,293 +87,22 @@ class FieldNames:
     END = "end"
     DELIVERY = "delivery"
     PICKUP = "pickup"
+    VIOLATIONS = "violations"
     REASON = "reason"
 
 
-# ---------------------------------------------------------------------------------------
-# attribute parsing, no QGIS layers involved (unit-tested on its own)
-# ---------------------------------------------------------------------------------------
+class Reasons:
+    UNREACHABLE = "unreachable"
+    NOT_ASSIGNED = "not assigned"
+    NOT_PLANNED = "no vehicle or sequence"
 
 
-def is_null(value: Any) -> bool:
-    """NULL attributes are None, or a null QVariant/QTime/QDateTime on QGIS 3."""
-    if value is None:
-        return True
-    is_null_fn = getattr(value, "isNull", None)
-    return bool(is_null_fn()) if callable(is_null_fn) else False
-
-
-def to_seconds(value: Any) -> Optional[int]:
-    """
-    A time attribute as integer seconds, None for NULL. Numbers are seconds already, a time
-    of day (QTime, "08:30", "08:30:15") counts from midnight, a date & time from the Unix
-    epoch. All times of one run must use the same kind, VROOM only compares numbers.
-
-    :raises ValueError: for anything else
-    """
-    if is_null(value):
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"'{value}' is not a time")
-    if isinstance(value, (int, float)):
-        return int(round(value))
-    if isinstance(value, QTime):
-        return value.msecsSinceStartOfDay() // 1000
-    if isinstance(value, QDateTime):
-        return int(value.toSecsSinceEpoch())
-    if isinstance(value, datetime):
-        return int(value.timestamp())
-    if isinstance(value, time):
-        return value.hour * 3600 + value.minute * 60 + value.second
-    if isinstance(value, str):
-        if match := _TIME_RE.match(value):
-            hours, minutes, seconds = (int(g or 0) for g in match.groups())
-            return hours * 3600 + minutes * 60 + seconds
-        try:
-            return int(round(float(value)))
-        except ValueError:
-            pass
-
-    raise ValueError(f"'{value}' is not a time: use seconds, HH:MM[:SS] or a time/date-time field")
-
-
-def to_amount(value: Any) -> Optional[List[int]]:
-    """
-    A capacity/delivery/pickup attribute as VROOM amount, None for NULL. A number is one
-    dimension, a comma separated text several (e.g. "10, 2" for weight and pallets).
-
-    :raises ValueError: for negative or non-numeric values
-    """
-    if is_null(value):
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"'{value}' is not an amount")
-    if isinstance(value, (int, float)):
-        parts = [value]
-    else:
-        parts = [p for p in str(value).split(",") if p.strip()]
-    try:
-        amount = [int(round(float(p))) for p in parts]
-    except ValueError:
-        raise ValueError(f"'{value}' is not an amount: use a number or comma separated numbers")
-    if any(a < 0 for a in amount):
-        raise ValueError(f"'{value}' is negative")
-
-    return amount
-
-
-def to_skills(value: Any) -> Optional[List[int]]:
-    """A skills attribute (an integer or comma separated integers) as VROOM skills."""
-    amount = to_amount(value)
-    return sorted(set(amount)) if amount is not None else None
-
-
-def to_int(value: Any, what: str) -> Optional[int]:
-    if is_null(value):
-        return None
-    try:
-        return int(round(float(value)))
-    except (TypeError, ValueError):
-        raise ValueError(f"'{value}' is not a valid {what}")
-
-
-def time_window(start: Optional[int], end: Optional[int]) -> Optional[List[int]]:
-    """A VROOM time window, open at the side that's None; None if both are."""
-    if start is None and end is None:
-        return None
-    start = 0 if start is None else start
-    end = OPEN_END if end is None else end
-    if start < 0 or end < start:
-        raise ValueError(f"the time window {start} to {end} is invalid")
-
-    return [start, end]
-
-
-def seconds_to_hms(seconds: Optional[int]) -> Optional[str]:
-    """HH:MM:SS for durations and times of day; None for epoch times (> 10 days)."""
-    if seconds is None or seconds < 0 or seconds >= 10 * 86400:
-        return None
-    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
-
-
-def pad_amounts(amounts: Sequence[Optional[List[int]]], dims: int) -> List[List[int]]:
-    """VROOM wants every amount with the same number of dimensions."""
-    return [(a or []) + [0] * (dims - len(a or [])) for a in amounts]
-
-
-def matrix_row_chunks(n_locations: int, max_pairs: int) -> List[List[int]]:
-    """
-    The source rows per matrix request so that rows x all targets stay within Valhalla's
-    max_matrix_location_pairs.
-
-    :raises ValueError: if not even one full row fits
-    """
-    if n_locations > max_pairs:
-        raise ValueError(
-            f"{n_locations} locations need at least {n_locations} matrix pairs per request, "
-            f"but the limit is {max_pairs}. Raise max_matrix_location_pairs on your own "
-            "Valhalla server and the matching parameter here."
-        )
-    rows = max(1, max_pairs // n_locations)
-    return [list(range(i, min(i + rows, n_locations))) for i in range(0, n_locations, rows)]
-
-
-def route_chunks(indices: Sequence[int], max_locations: int) -> List[List[int]]:
-    """
-    Consecutive stops split into route requests of at most ``max_locations``, each starting
-    where the last one ended. Repeated consecutive stops (two jobs at one place) are dropped.
-    """
-    if max_locations < 2:
-        raise ValueError("A route request needs at least 2 locations")
-    stops = [i for n, i in enumerate(indices) if n == 0 or i != indices[n - 1]]
-    if len(stops) < 2:
-        return []
-    chunks, start = list(), 0
-    while start < len(stops) - 1:
-        chunks.append(stops[start : start + max_locations])
-        start += max_locations - 1
-
-    return chunks
-
-
-def unreachable_jobs(
-    durations: List[List[Optional[float]]],
-    vehicle_starts: Sequence[int],
-    vehicle_ends: Sequence[Optional[int]],
-    job_locations: Sequence[int],
-) -> List[int]:
-    """The jobs (as positions in ``job_locations``) no vehicle can get to and back from."""
-    unreachable = list()
-    for job, loc in enumerate(job_locations):
-        if not any(
-            durations[start][loc] is not None and (end is None or durations[loc][end] is not None)
-            for start, end in zip(vehicle_starts, vehicle_ends)
-        ):
-            unreachable.append(job)
-
-    return unreachable
-
-
-def vroom_matrix(rows: List[List[Optional[float]]], keep: Sequence[int]) -> List[List[int]]:
-    """The submatrix of the ``keep`` locations, as integers, unroutable cells very expensive."""
-    return [[UNROUTABLE if rows[i][j] is None else int(round(rows[i][j])) for j in keep] for i in keep]
-
-
-@dataclass
-class Vehicle:
-    feature: QgsFeature
-    vehicle_id: Any
-    location: int
-    capacity: Optional[List[int]] = None
-    shift: Optional[List[int]] = None
-    skills: Optional[List[int]] = None
-    max_tasks: Optional[int] = None
-    break_window: Optional[List[int]] = None
-    break_duration: Optional[int] = None
-
-
-@dataclass
-class Job:
-    feature: QgsFeature
-    location: int
-    service: Optional[int] = None
-    delivery: Optional[List[int]] = None
-    pickup: Optional[List[int]] = None
-    window: Optional[List[int]] = None
-    skills: Optional[List[int]] = None
-    priority: Optional[int] = None
-
-
-@dataclass
-class Problem:
-    vehicles: List[Vehicle] = field(default_factory=list)
-    jobs: List[Job] = field(default_factory=list)
-    coords: List[Tuple[float, float]] = field(default_factory=list)  # WGS84, by location index
-
-
-def build_vroom_problem(
-    problem: Problem,
-    profile: str,
-    return_to_start: bool,
-    durations: List[List[Optional[float]]],
-    distances: List[List[Optional[float]]],
-    skip_jobs: Sequence[int] = (),
-) -> Tuple[dict, List[int]]:
-    """
-    VROOM's input JSON for ``problem``, and the location indices it kept (VROOM's location
-    index i is ``keep[i]``). Vehicle i has VROOM id i, job k has VROOM id k, so the solution
-    maps straight back onto the lists. The skipped jobs' locations are left out.
-
-    :raises ValueError: on inconsistent amounts
-    """
-    skip = set(skip_jobs)
-    jobs = [(k, job) for k, job in enumerate(problem.jobs) if k not in skip]
-    keep = sorted({v.location for v in problem.vehicles} | {job.location for _, job in jobs})
-    new_index = {old: new for new, old in enumerate(keep)}
-
-    has_amounts = any(job.delivery or job.pickup for _, job in jobs)
-    has_capacity = any(v.capacity for v in problem.vehicles)
-    if has_amounts and not all(v.capacity for v in problem.vehicles):
-        raise ValueError(
-            "Jobs have delivery or pickup amounts, so every vehicle needs a capacity"
-            if not has_capacity
-            else "Some vehicles have no capacity, set it for all of them"
-        )
-    dims = max(
-        [len(v.capacity or []) for v in problem.vehicles]
-        + [len(job.delivery or []) for _, job in jobs]
-        + [len(job.pickup or []) for _, job in jobs]
-        + [0]
-    )
-
-    vehicles = list()
-    for i, v in enumerate(problem.vehicles):
-        vehicle = {"id": i, "profile": profile, "start_index": new_index[v.location]}
-        if return_to_start:
-            vehicle["end_index"] = new_index[v.location]
-        if dims and has_capacity:
-            vehicle["capacity"] = pad_amounts([v.capacity], dims)[0]
-        if v.shift:
-            vehicle["time_window"] = v.shift
-        if v.skills:
-            vehicle["skills"] = v.skills
-        if v.max_tasks is not None:
-            vehicle["max_tasks"] = v.max_tasks
-        if v.break_duration:
-            window = v.break_window or v.shift or [0, OPEN_END]
-            vehicle["breaks"] = [{"id": i, "time_windows": [window], "service": v.break_duration}]
-        vehicles.append(vehicle)
-
-    vroom_jobs = list()
-    for k, job in jobs:
-        vroom_job = {"id": k, "location_index": new_index[job.location]}
-        if job.service:
-            vroom_job["service"] = job.service
-        if dims and has_amounts:
-            vroom_job["delivery"], vroom_job["pickup"] = pad_amounts([job.delivery, job.pickup], dims)
-        if job.window:
-            vroom_job["time_windows"] = [job.window]
-        if job.skills:
-            vroom_job["skills"] = job.skills
-        if job.priority is not None:
-            vroom_job["priority"] = job.priority
-        vroom_jobs.append(vroom_job)
-
-    return {
-        "vehicles": vehicles,
-        "jobs": vroom_jobs,
-        "matrices": {
-            profile: {
-                "durations": vroom_matrix(durations, keep),
-                "distances": vroom_matrix(distances, keep),
-            }
-        },
-    }, keep
-
-
-# ---------------------------------------------------------------------------------------
-# the Processing algorithm
-# ---------------------------------------------------------------------------------------
+def violations_text(violations: List[dict]) -> Optional[str]:
+    """VROOM's violations as text, e.g. "delay 600 s, load"; None if there are none."""
+    parts = [
+        f"{v['cause']} {v['duration']} s" if v.get("duration") else v["cause"] for v in violations or []
+    ]
+    return ", ".join(parts) or None
 
 
 class ValhallaVrpBase(ValhallaBaseAlgorithm):
@@ -375,9 +118,14 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
     IN_JOB_TW_END = "INPUT_JOB_TW_END"
     IN_JOB_SKILLS = "INPUT_JOB_SKILLS"
     IN_JOB_PRIORITY = "INPUT_JOB_PRIORITY"
+    IN_JOB_SHIPMENT = "INPUT_JOB_SHIPMENT_ID"
+    IN_JOB_ROLE = "INPUT_JOB_SHIPMENT_ROLE"
+    IN_JOB_VEHICLE = "INPUT_JOB_VEHICLE"
+    IN_JOB_SEQUENCE = "INPUT_JOB_SEQUENCE"
 
     IN_VEH = "INPUT_VEHICLES"
     IN_VEH_ID = "INPUT_VEHICLE_ID"
+    IN_VEH_PROFILE = "INPUT_VEHICLE_PROFILE"
     IN_VEH_CAPACITY = "INPUT_VEHICLE_CAPACITY"
     IN_VEH_TW_START = "INPUT_VEHICLE_SHIFT_START"
     IN_VEH_TW_END = "INPUT_VEHICLE_SHIFT_END"
@@ -387,6 +135,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
     IN_VEH_BREAK_END = "INPUT_VEHICLE_BREAK_END"
     IN_VEH_BREAK_DURATION = "INPUT_VEHICLE_BREAK_DURATION"
     IN_RETURN = "INPUT_RETURN_TO_START"
+    IN_KEEP_ORDER = "INPUT_KEEP_ORDER"
 
     IN_EXPLORATION = "INPUT_EXPLORATION_LEVEL"
     IN_TIMEOUT = "INPUT_TIMEOUT"
@@ -410,16 +159,45 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         )
         self.parameterDefinition(self.OUT).setDescription("vrp_routes")
 
-        for name, desc, field_type in (
-            (self.IN_JOB_SERVICE, "Job service time field (seconds)", "numeric"),
-            (self.IN_JOB_DELIVERY, "Job delivery amount field (number, or comma separated)", "any"),
-            (self.IN_JOB_PICKUP, "Job pickup amount field (number, or comma separated)", "any"),
-            (self.IN_JOB_TW_START, "Job time window start field (seconds, HH:MM or time)", "any"),
-            (self.IN_JOB_TW_END, "Job time window end field (seconds, HH:MM or time)", "any"),
-            (self.IN_JOB_SKILLS, "Job required skills field (integers, comma separated)", "any"),
-            (self.IN_JOB_PRIORITY, "Job priority field (0 to 100, higher is served first)", "numeric"),
+        for name, desc, field_type, advanced in (
+            (self.IN_JOB_SERVICE, "Job service time field (seconds)", "numeric", False),
+            (
+                self.IN_JOB_DELIVERY,
+                "Job delivery amount field (number, or comma separated)",
+                "any",
+                False,
+            ),
+            (self.IN_JOB_PICKUP, "Job pickup amount field (number, or comma separated)", "any", False),
+            (self.IN_JOB_TW_START, "Job time window start field (seconds, HH:MM or time)", "any", False),
+            (self.IN_JOB_TW_END, "Job time window end field (seconds, HH:MM or time)", "any", False),
+            (self.IN_JOB_SKILLS, "Job required skills field (integers, comma separated)", "any", False),
+            (
+                self.IN_JOB_PRIORITY,
+                "Job priority field (0 to 100, higher is served first)",
+                "numeric",
+                False,
+            ),
+            (
+                self.IN_JOB_SHIPMENT,
+                "Shipment ID field: two jobs with one ID are a pickup and its delivery",
+                "any",
+                True,
+            ),
+            (self.IN_JOB_ROLE, "Shipment role field: 'pickup' or 'delivery'", "any", True),
+            (
+                self.IN_JOB_VEHICLE,
+                "Assigned vehicle field: keeps a job on this vehicle (its vehicle ID)",
+                "any",
+                True,
+            ),
+            (
+                self.IN_JOB_SEQUENCE,
+                "Sequence field: a job's position in its vehicle's route (for keeping the order)",
+                "numeric",
+                True,
+            ),
         ):
-            self._add_field_param(name, desc, self.IN_1, field_type)
+            self._add_field_param(name, desc, self.IN_1, field_type, advanced)
 
         self.addParameter(
             QgsProcessingParameterFeatureSource(
@@ -430,6 +208,12 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         )
         for name, desc, field_type in (
             (self.IN_VEH_ID, "Vehicle ID field (feature IDs if empty)", "any"),
+            (
+                self.IN_VEH_PROFILE,
+                "Vehicle travel mode field (auto, truck, bus, bicycle, pedestrian, motorcycle; "
+                "empty = this algorithm's)",
+                "any",
+            ),
             (self.IN_VEH_CAPACITY, "Vehicle capacity field (number, or comma separated)", "any"),
             (self.IN_VEH_TW_START, "Vehicle shift start field (seconds, HH:MM or time)", "any"),
             (self.IN_VEH_TW_END, "Vehicle shift end field (seconds, HH:MM or time)", "any"),
@@ -439,13 +223,20 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             (self.IN_VEH_BREAK_END, "Vehicle break window end field", "any"),
             (self.IN_VEH_BREAK_DURATION, "Vehicle break duration field (seconds)", "numeric"),
         ):
-            self._add_field_param(name, desc, self.IN_VEH, field_type)
+            self._add_field_param(name, desc, self.IN_VEH, field_type, False)
 
         self.addParameter(
             QgsProcessingParameterBoolean(
                 self.IN_RETURN, "Vehicles return to where they started", defaultValue=True
             )
         )
+        keep_order = QgsProcessingParameterBoolean(
+            self.IN_KEEP_ORDER,
+            "Keep the assigned vehicles and sequence, only compute times (needs both fields)",
+            defaultValue=False,
+        )
+        keep_order.setFlags(keep_order.flags() | QgsProcessingParameterDefinition.Flag.FlagAdvanced)
+        self.addParameter(keep_order)
 
         for name, desc, default, minimum, maximum in (
             (self.IN_EXPLORATION, "Solver exploration level (1 fast to 5 thorough)", 5, 1, 5),
@@ -474,19 +265,19 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             )
         )
 
-    def _add_field_param(self, name: str, desc: str, parent: str, field_type: str):
+    def _add_field_param(self, name: str, desc: str, parent: str, field_type: str, advanced: bool):
         types = {
             "numeric": QgsProcessingParameterField.DataType.Numeric,
             "any": QgsProcessingParameterField.DataType.Any,
         }
-        self.addParameter(
-            QgsProcessingParameterField(
-                name, desc, parentLayerParameterName=parent, type=types[field_type], optional=True
-            )
+        param = QgsProcessingParameterField(
+            name, desc, parentLayerParameterName=parent, type=types[field_type], optional=True
         )
+        if advanced:
+            param.setFlags(param.flags() | QgsProcessingParameterDefinition.Flag.FlagAdvanced)
+        self.addParameter(param)
 
-    # flake8: noqa: C901
-    def processAlgorithm(
+    def processAlgorithm(  # noqa: C901 - matrices, solve, three outputs
         self, parameters, context: QgsProcessingContext, feedback: QgsProcessingFeedback
     ):
         jobs_source, job_id_field, params, results_factory = self.get_base_params(parameters, context)
@@ -495,58 +286,77 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             if source is None:
                 raise QgsProcessingException(self.invalidSourceError(parameters, name))
         return_to_start = self.parameterAsBoolean(parameters, self.IN_RETURN, context)
+        plan = self.parameterAsBoolean(parameters, self.IN_KEEP_ORDER, context)
         max_pairs = self.parameterAsInt(parameters, self.IN_MAX_PAIRS, context)
         max_locations = self.parameterAsInt(parameters, self.IN_MAX_LOCATIONS, context)
+
+        if plan and not all(
+            self.parameterAsString(parameters, p, context)
+            for p in (self.IN_JOB_VEHICLE, self.IN_JOB_SEQUENCE)
+        ):
+            raise QgsProcessingException(
+                "Keeping the order needs the assigned vehicle and the sequence field"
+            )
+        if plan and self.parameterAsString(parameters, self.IN_VEH_BREAK_DURATION, context):
+            feedback.reportError("Breaks are left out when keeping the order", fatalError=False)
 
         problem = self._read_problem(parameters, context, jobs_source, job_id_field, veh_source)
         if not problem.jobs:
             raise QgsProcessingException("The jobs layer has no features")
         if not problem.vehicles:
             raise QgsProcessingException("The vehicles layer has no features")
-        feedback.pushInfo(f"{len(problem.jobs)} jobs, {len(problem.vehicles)} vehicles")
+        try:
+            problem.shipments()  # validates the pairs before any request
+        except ValueError as e:
+            raise QgsProcessingException(str(e))
+        feedback.pushInfo(
+            f"{len(problem.jobs)} jobs, {len(problem.vehicles)} vehicles ({', '.join(problem.profiles())})"
+        )
 
-        # 1. one matrix between all locations, in chunks of source rows
+        # 1. a matrix between all locations per travel mode, in chunks of source rows
         try:
             chunks = matrix_row_chunks(len(problem.coords), max_pairs)
         except ValueError as e:
             raise QgsProcessingException(str(e))
-        durations: List[List[Optional[float]]] = list()
-        distances: List[List[Optional[float]]] = list()
+        matrices: Matrices = dict()
         all_targets = list(range(len(problem.coords)))
-        for n, rows in enumerate(chunks):
-            if feedback.isCanceled():
-                return {}
-            matrix = self._request(
-                results_factory,
-                RouterEndpoint.MATRIX,
-                problem.coords,
-                {**params, "sources": rows, "destinations": all_targets},
-            )
-            durations.extend(matrix.durations)
-            distances.extend(matrix.distances)
-            feedback.setProgress(int(40 * (n + 1) / len(chunks)))
+        n_requests, done = len(chunks) * len(problem.profiles()), 0
+        for profile in problem.profiles():
+            durations: List[List[Optional[float]]] = list()
+            distances: List[List[Optional[float]]] = list()
+            with self._profile(results_factory, profile):
+                for rows in chunks:
+                    if feedback.isCanceled():
+                        return {}
+                    matrix = self._request(
+                        results_factory,
+                        RouterEndpoint.MATRIX,
+                        problem.coords,
+                        {
+                            **self._profile_params(params, profile),
+                            "sources": rows,
+                            "destinations": all_targets,
+                        },
+                    )
+                    durations.extend(matrix.durations)
+                    distances.extend(matrix.distances)
+                    done += 1
+                    feedback.setProgress(int(40 * done / n_requests))
+            matrices[profile] = (durations, distances)
 
         # 2. solve, without the jobs no vehicle can get to
-        vehicle_ends = [v.location if return_to_start else None for v in problem.vehicles]
-        unreachable = unreachable_jobs(
-            durations,
-            [v.location for v in problem.vehicles],
-            vehicle_ends,
-            [job.location for job in problem.jobs],
-        )
+        unreachable = unreachable_jobs(problem, matrices, return_to_start)
         if unreachable:
             feedback.reportError(
-                f"{len(unreachable)} jobs can't be reached by any vehicle, "
-                "they're in the unassigned output",
+                f"{len(unreachable)} jobs can't be reached by any vehicle, they're in the unassigned output",
                 fatalError=False,
             )
         if len(unreachable) == len(problem.jobs):
             raise QgsProcessingException("No job can be reached by any vehicle")
 
-        profile = self.profile.lower()
         try:
-            vroom_problem, keep = build_vroom_problem(
-                problem, profile, return_to_start, durations, distances, unreachable
+            vroom_problem, keep, unplanned = build_vroom_problem(
+                problem, return_to_start, matrices, unreachable, plan=plan
             )
         except ValueError as e:
             raise QgsProcessingException(str(e))
@@ -557,6 +367,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                 exploration_level=self.parameterAsInt(parameters, self.IN_EXPLORATION, context),
                 threads=self.parameterAsInt(parameters, self.IN_THREADS, context),
                 timeout=self.parameterAsInt(parameters, self.IN_TIMEOUT, context) or None,
+                plan=plan,
                 is_canceled=feedback.isCanceled,
             )
         except VroomError as e:
@@ -569,9 +380,11 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         feedback.pushInfo(
             f"VROOM: {summary.get('routes', 0)} routes, {summary.get('unassigned', 0)} jobs unassigned"
         )
+        if plan and (violations := violations_text(summary.get("violations"))):
+            feedback.reportError(f"The kept routes break constraints: {violations}", fatalError=False)
 
         # 3. outputs: routes with their Valhalla geometry, stops, unassigned jobs
-        sinks = self._create_sinks(parameters, context, jobs_source, job_id_field, veh_source)
+        sinks = self._create_sinks(parameters, context, jobs_source, veh_source)
         routes_sink, routes_dest, routes_fields, veh_copied = sinks["routes"]
         stops_sink, stops_dest, stops_fields, job_copied = sinks["stops"]
         unassigned_sink, unassigned_dest, unassigned_fields, _ = sinks["unassigned"]
@@ -585,17 +398,22 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             # VROOM's location indices are into the submatrix ``keep``
             stop_locations = [keep[s["location_index"]] for s in steps if "location_index" in s]
 
-            geometry, distance = self._route_geometry(
-                results_factory, params, problem.coords, stop_locations, max_locations
-            )
-            n_jobs = sum(1 for s in steps if s["type"] in ("job", "pickup", "delivery"))
+            with self._profile(results_factory, vehicle.profile):
+                geometry, distance = self._route_geometry(
+                    results_factory,
+                    self._profile_params(params, vehicle.profile),
+                    problem.coords,
+                    stop_locations,
+                    max_locations,
+                )
             route_feat = QgsFeature(routes_fields)
             veh_attrs = vehicle.feature.attributes()
             route_feat.setAttributes(
                 [veh_attrs[i] for i in veh_copied]
                 + [
                     vehicle.vehicle_id,
-                    n_jobs,
+                    vehicle.profile,
+                    sum(1 for s in steps if s["type"] in JOB_STEPS),
                     route.get("duration"),
                     distance,
                     route.get("service"),
@@ -604,6 +422,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                     steps[-1].get("arrival") if steps else None,
                     ",".join(map(str, route.get("delivery", []))) or None,
                     ",".join(map(str, route.get("pickup", []))) or None,
+                    violations_text(route.get("violations")),
                 ]
             )
             if geometry is not None:
@@ -617,8 +436,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                 arrival = step.get("arrival")
                 service = step.get("service", 0)
                 waiting = step.get("waiting_time", 0)
-                is_job = step["type"] in ("job", "pickup", "delivery")
-                if is_job:
+                if step["type"] in JOB_STEPS:
                     job_attrs = problem.jobs[step["id"]].feature.attributes()
                     copied = [job_attrs[i] for i in job_copied]
                 else:  # start, end, break: no job to copy from
@@ -636,6 +454,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                         service,
                         waiting,
                         ",".join(map(str, step.get("load", []))) or None,
+                        violations_text(step.get("violations")),
                     ]
                 )
                 stop_feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(*problem.coords[location])))
@@ -643,9 +462,12 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
 
             feedback.setProgress(70 + int(30 * (n + 1) / max(len(routes), 1)))
 
-        unassigned = [(k, "unreachable") for k in unreachable] + [
-            (u["id"], "not assigned") for u in solution.get("unassigned", [])
-        ]
+        # a shipment's two parts are both listed by VROOM
+        unassigned = (
+            [(k, Reasons.UNREACHABLE) for k in unreachable]
+            + [(k, Reasons.NOT_PLANNED) for k in unplanned]
+            + [(u["id"], Reasons.NOT_ASSIGNED) for u in solution.get("unassigned", [])]
+        )
         for k, reason in unassigned:
             job = problem.jobs[k]
             feat = QgsFeature(unassigned_fields)
@@ -660,7 +482,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             self.OUT_UNASSIGNED: unassigned_dest,
         }
 
-    def _read_problem(
+    def _read_problem(  # noqa: C901 - one read per field
         self,
         parameters,
         context,
@@ -690,16 +512,21 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             problem.coords.append(tuple(coords[:2]))
             return len(problem.coords) - 1
 
+        def raw(value: Any) -> Any:
+            """An ID attribute, None for NULL or empty text."""
+            return None if is_null(value) or str(value).strip() == "" else value
+
+        own_profile = self.profile.value
         veh_id_field = field(self.IN_VEH_ID)
         seen_ids = set()
         for feat in veh_source.getFeatures():
             veh_id = feat[veh_id_field] if veh_id_field else feat.id()
             what = f"Vehicle {veh_id}"
-            if veh_id in seen_ids:
+            if str(veh_id) in seen_ids:
                 raise QgsProcessingException(
                     f"{what} appears twice, the vehicle ID field must be unique"
                 )
-            seen_ids.add(veh_id)
+            seen_ids.add(str(veh_id))
             try:
                 shift = time_window(
                     read(feat, self.IN_VEH_TW_START, to_seconds, what),
@@ -713,9 +540,9 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                 raise QgsProcessingException(f"{what}: {e}")
             problem.vehicles.append(
                 Vehicle(
-                    feature=feat,
                     vehicle_id=veh_id,
                     location=add_location(feat, veh_source.sourceCrs(), what),
+                    profile=read(feat, self.IN_VEH_PROFILE, to_profile, what) or own_profile,
                     capacity=read(feat, self.IN_VEH_CAPACITY, to_amount, what),
                     shift=shift,
                     skills=read(feat, self.IN_VEH_SKILLS, to_skills, what),
@@ -724,6 +551,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                     break_duration=read(
                         feat, self.IN_VEH_BREAK_DURATION, lambda v: to_int(v, "duration"), what
                     ),
+                    feature=feat,
                 )
             )
 
@@ -741,7 +569,6 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                 raise QgsProcessingException(f"{what}: the priority must be 0 to 100, not {priority}")
             problem.jobs.append(
                 Job(
-                    feature=feat,
                     location=add_location(feat, jobs_source.sourceCrs(), what),
                     service=read(feat, self.IN_JOB_SERVICE, lambda v: to_int(v, "duration"), what),
                     delivery=read(feat, self.IN_JOB_DELIVERY, to_amount, what),
@@ -749,12 +576,18 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                     window=window,
                     skills=read(feat, self.IN_JOB_SKILLS, to_skills, what),
                     priority=priority,
+                    shipment_id=read(feat, self.IN_JOB_SHIPMENT, raw, what),
+                    role=read(feat, self.IN_JOB_ROLE, to_role, what),
+                    vehicle_id=read(feat, self.IN_JOB_VEHICLE, raw, what),
+                    sequence=read(feat, self.IN_JOB_SEQUENCE, lambda v: to_int(v, "sequence"), what),
+                    label=what,
+                    feature=feat,
                 )
             )
 
         return problem
 
-    def _create_sinks(self, parameters, context, jobs_source, job_id_field, veh_source) -> dict:
+    def _create_sinks(self, parameters, context, jobs_source, veh_source) -> dict:
         """The three outputs; each starts with the attributes of the layer it describes."""
         output_fields = SpoptBaseAlgorithm._output_fields
         veh_id = SpoptBaseAlgorithm._id_field(
@@ -765,12 +598,13 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
 
         route_result = QgsFields()
         route_result.append(veh_id)
+        route_result.append(QgsField(FieldNames.PROFILE, QVariant.String))
         route_result.append(QgsField(FieldNames.STOPS, QVariant.Int))
         for name in (FieldNames.DURATION, FieldNames.DISTANCE, FieldNames.SERVICE, FieldNames.WAITING):
             route_result.append(QgsField(name, QVariant.Double))
         for name in (FieldNames.START, FieldNames.END):
             route_result.append(QgsField(name, QVariant.LongLong))
-        for name in (FieldNames.DELIVERY, FieldNames.PICKUP):
+        for name in (FieldNames.DELIVERY, FieldNames.PICKUP, FieldNames.VIOLATIONS):
             route_result.append(QgsField(name, QVariant.String))
         routes_fields, veh_copied = output_fields(veh_source, route_result)
 
@@ -784,6 +618,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         stop_result.append(QgsField(FieldNames.SERVICE, QVariant.Int))
         stop_result.append(QgsField(FieldNames.WAITING, QVariant.Int))
         stop_result.append(QgsField(FieldNames.LOAD, QVariant.String))
+        stop_result.append(QgsField(FieldNames.VIOLATIONS, QVariant.String))
         stops_fields, job_copied = output_fields(jobs_source, stop_result)
 
         unassigned_result = QgsFields()
@@ -810,6 +645,28 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             sinks[key] = (sink, dest, fields, copied)
 
         return sinks
+
+    def _profile_params(self, params: dict, profile: str) -> dict:
+        """
+        The request params for a travel mode: this algorithm's costing options only apply to
+        its own profile, other vehicles get Valhalla's defaults (and the same avoid areas).
+        """
+        if profile == self.profile.value or "options" not in params:
+            return params
+        return {**params, "options": {"shortest": params["options"].get("shortest", False)}}
+
+    class _profile:
+        """Temporarily switches the results factory to another travel mode."""
+
+        def __init__(self, results_factory, profile: str):
+            self.results_factory, self.profile = results_factory, RouterProfile(profile)
+
+        def __enter__(self):
+            self.previous = self.results_factory.profile
+            self.results_factory.profile = self.profile
+
+        def __exit__(self, *exc):
+            self.results_factory.profile = self.previous
 
     def _route_geometry(
         self,

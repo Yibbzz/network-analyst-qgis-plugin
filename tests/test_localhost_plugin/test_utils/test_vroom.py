@@ -44,6 +44,15 @@ class TestVroom(unittest.TestCase):
         # out and back along the line
         self.assertEqual(solution["routes"][0]["duration"], 60)
 
+    def test_plan(self):
+        """Plan mode keeps the order, however bad, and reports what it breaks."""
+        steps = [{"type": "start"}] + [{"type": "job", "id": i} for i in (3, 1, 2)] + [{"type": "end"}]
+        solution = vroom.solve(problem(capacity=[3], steps=steps, time_window=[0, 50]), plan=True)
+        route = solution["routes"][0]
+        self.assertEqual([s.get("id") for s in route["steps"]], [None, 3, 1, 2, None])
+        self.assertEqual(route["duration"], 80)  # 30 + 20 + 10 + 20
+        self.assertIn("delay", [v["cause"] for v in route["violations"]])
+
     def test_capacity_leaves_jobs_unassigned(self):
         solution = vroom.solve(problem(capacity=[2]))
         self.assertEqual(len(solution["unassigned"]), 1)

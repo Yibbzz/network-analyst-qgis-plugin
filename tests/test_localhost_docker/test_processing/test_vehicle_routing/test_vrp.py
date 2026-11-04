@@ -218,3 +218,103 @@ class TestVrp(LocalhostDockerTestCase):
             )
         with self.assertRaisesRegex(QgsProcessingException, "unique"):
             self.run_vrp({"INPUT_LAYER_1": jobs_layer(), "INPUT_VEHICLES": vehicles_layer(["a", "a"])})
+
+    def test_mixed_fleet(self):
+        # only the walker can serve job 0 (Escaldes, close by)
+        skills = [""] * len(JOBS)
+        skills[0] = "5"
+        out = self.run_vrp(
+            {
+                "INPUT_LAYER_1": jobs_layer(skills=skills),
+                "INPUT_JOB_SKILLS": "skills",
+                "INPUT_VEHICLES": vehicles_layer(
+                    ["walker", "van"], mode=["pedestrian", ""], skills=["5", ""]
+                ),
+                "INPUT_VEHICLE_PROFILE": "mode",
+                "INPUT_VEHICLE_SKILLS": "skills",
+            }
+        )
+        routes = {r["vehicle_id"]: r for r in out["routes"]}
+        self.assertEqual(routes["walker"]["profile"], "pedestrian")
+        self.assertEqual(routes["van"]["profile"], "auto")  # the algorithm's own
+        self.assertEqual(self.jobs_by_vehicle(out["stops"])["walker"], ["job 0"])
+        # seconds per meter: walking is several times slower than driving
+        pace = {v: r["duration"] / r["distance"] for v, r in routes.items()}
+        self.assertGreater(pace["walker"], 3 * pace["van"])
+
+    def test_shipments(self):
+        # job 2 -> job 1 and job 6 -> job 3 are pickups with their deliveries
+        shipment = [""] * len(JOBS)
+        role = [""] * len(JOBS)
+        for pickup, delivery, sid in ((2, 1, "s1"), (6, 3, "s2")):
+            shipment[pickup] = shipment[delivery] = sid
+            role[pickup], role[delivery] = "pickup", "delivery"
+        out = self.run_vrp(
+            {
+                "INPUT_LAYER_1": jobs_layer(shipment=shipment, role=role, amount=[1] * len(JOBS)),
+                "INPUT_JOB_SHIPMENT_ID": "shipment",
+                "INPUT_JOB_SHIPMENT_ROLE": "role",
+                "INPUT_JOB_DELIVERY": "amount",
+                "INPUT_VEHICLES": vehicles_layer(["a", "b"], cap=[10, 10]),
+                "INPUT_VEHICLE_CAPACITY": "cap",
+            }
+        )
+        self.assertEqual(out["unassigned"], [])
+        steps = {s["name"]: s for s in out["stops"] if s["type"] in ("job", "pickup", "delivery")}
+        for pickup, delivery in ((2, 1), (6, 3)):
+            p, d = steps[f"job {pickup}"], steps[f"job {delivery}"]
+            self.assertEqual((p["type"], d["type"]), ("pickup", "delivery"))
+            self.assertEqual(p["vehicle_id"], d["vehicle_id"])
+            self.assertLess(p["sequence"], d["sequence"])
+
+    def test_locked_vehicles(self):
+        assigned = [""] * len(JOBS)
+        assigned[6], assigned[7] = "b", "a"  # Soldeu and Arinsal, opposite ends
+        out = self.run_vrp(
+            {
+                "INPUT_LAYER_1": jobs_layer(assigned=assigned),
+                "INPUT_JOB_VEHICLE": "assigned",
+                "INPUT_VEHICLES": vehicles_layer(["a", "b"]),
+            }
+        )
+        by_vehicle = self.jobs_by_vehicle(out["stops"])
+        self.assertIn("job 6", by_vehicle["b"])
+        self.assertIn("job 7", by_vehicle["a"])
+        self.assertEqual(out["unassigned"], [])
+
+    def test_keep_order(self):
+        """Plan mode keeps a bad order, computes its times and reports the late job."""
+        assigned = [""] * len(JOBS)
+        sequence = [0] * len(JOBS)
+        tw_end = [""] * len(JOBS)
+        for seq, job in enumerate((6, 2, 0)):  # Soldeu, Sant Julià, Escaldes: zig-zag
+            assigned[job], sequence[job] = "a", seq + 1
+        tw_end[0] = "00:10"  # can't be in Escaldes within 10 minutes after Soldeu
+        out = self.run_vrp(
+            {
+                "INPUT_LAYER_1": jobs_layer(assigned=assigned, seq=sequence, tw_end=tw_end),
+                "INPUT_JOB_VEHICLE": "assigned",
+                "INPUT_JOB_SEQUENCE": "seq",
+                "INPUT_JOB_TW_END": "tw_end",
+                "INPUT_KEEP_ORDER": True,
+                "INPUT_VEHICLES": vehicles_layer(["a", "b"]),
+            }
+        )
+        self.assertEqual(self.jobs_by_vehicle(out["stops"]), {"a": ["job 6", "job 2", "job 0"]})
+        self.assertEqual(
+            {f["name"]: f["reason"] for f in out["unassigned"]},
+            {f"job {i}": "no vehicle or sequence" for i in range(len(JOBS)) if i not in (6, 2, 0)},
+        )
+        late = [s for s in out["stops"] if s["name"] == "job 0"][0]
+        self.assertIn("delay", late["violations"])
+        self.assertIn("delay", out["routes"][0]["violations"])
+
+    def test_keep_order_needs_fields(self):
+        with self.assertRaisesRegex(QgsProcessingException, "sequence"):
+            self.run_vrp(
+                {
+                    "INPUT_LAYER_1": jobs_layer(),
+                    "INPUT_KEEP_ORDER": True,
+                    "INPUT_VEHICLES": vehicles_layer(["a"]),
+                }
+            )

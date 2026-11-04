@@ -29,6 +29,8 @@ class SolveRequest:
     exploration_level: int = 5  # 1..5, VROOM's -x
     threads: int = 4  # VROOM's -t
     timeout: Optional[float] = None  # seconds, None = no limit
+    # plan mode: keep the vehicles' "steps" as given and only compute the times (VROOM's -c)
+    plan: bool = False
 
 
 @dataclass
@@ -57,11 +59,14 @@ def solve(req: SolveRequest) -> SolveResponse:
         problem_path.write_text(json.dumps(req.problem))
         try:
             problem = vroom.Input.from_json(problem_path)
-            solution = problem.solve(
-                exploration_level=int(req.exploration_level),
-                nb_threads=int(req.threads),
-                timeout=timedelta(seconds=req.timeout) if req.timeout else None,
-            )
+            if req.plan:
+                solution = problem.check(nb_threads=int(req.threads))
+            else:
+                solution = problem.solve(
+                    exploration_level=int(req.exploration_level),
+                    nb_threads=int(req.threads),
+                    timeout=timedelta(seconds=req.timeout) if req.timeout else None,
+                )
         except Exception as e:  # noqa: BLE001 - VroomInputException & co, all bad input
             raise InputError(str(e) or type(e).__name__)
 

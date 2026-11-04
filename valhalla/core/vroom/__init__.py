@@ -26,6 +26,7 @@ def solve(
     exploration_level: int = 5,
     threads: int = 4,
     timeout: Optional[float] = None,
+    plan: bool = False,
     is_canceled: Callable[[], bool] = lambda: False,
 ) -> Optional[dict]:
     """
@@ -35,6 +36,7 @@ def solve(
     :param exploration_level: 1 (fast) to 5 (thorough)
     :param threads: number of threads VROOM may use
     :param timeout: seconds after which VROOM returns its best solution so far, None = no limit
+    :param plan: keep every vehicle's "steps" and only compute times and violations
     :param is_canceled: polled while solving, e.g. a QgsFeedback's isCanceled
     :returns: the solution, None if canceled
     :raises VroomError: if pyvroom isn't installed or the solve failed
@@ -45,7 +47,7 @@ def solve(
         )
 
     request = SolveRequest(
-        problem=problem, exploration_level=exploration_level, threads=threads, timeout=timeout
+        problem=problem, exploration_level=exploration_level, threads=threads, timeout=timeout, plan=plan
     )
 
     # only the pyvroom tree, not the host's PYTHONPATH: nothing from the QGIS env may mix in
