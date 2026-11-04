@@ -408,6 +408,22 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   Breaks not listed in the steps are silently dropped by VROOM, so they're left out with a warning.
 - Tests: `test_vrp_problem.py` (no valhalla), `test_vroom.py` (the runner), and the algorithm
   against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
+- **Waste collection** (`vehicle_routing/waste.py`, `valhalla:valhalla_waste_<profile>`): the VRP
+  algorithm minus shipments/locks/plan mode, plus landfills, an unload time and max trips; the
+  pickup amount is the waste. VROOM has no reloads, so `multi_trip.solve_multi_trip` solves in
+  **rounds**: each round gives every active vehicle one trip from where it is to its nearest
+  landfill (`Vehicle.end_location`), shift-limited so it can still unload and get home; served
+  jobs drop out; a vehicle that gets nothing in a round is done. The rounds are stitched into one
+  VROOM-like route per vehicle with `landfill` steps and global location indices
+  (`identity_keep`), so the VRP output code writes them unchanged. The hooks that make this a
+  subclass: `_read_extra` (landfills appended to `problem.coords` before the matrices) and
+  `_solve`. Tests: `test_multi_trip.py` (real VROOM, no valhalla), `test_waste.py` (Andorra).
+- **Cost barriers are NOT built on `linear_cost_factors` (yet)**: on Valhalla 3.9.1 /route sometimes
+  ignores a factor on part of a road (e.g. factor 10 on 5 edges of CG-2: no change, factor 1000:
+  detour) while /sources_to_targets honours it; factors on a single short edge or < 1
+  (`min_linear_cost_factor` = 1 by default) do nothing. Repro: route A→B, edge-walk its shape with
+  /trace_attributes, factor the shape between edges i-2..i+2, route again. Revisit added-cost
+  point / scaled-cost polygon barriers once that's understood upstream.
 - **Dock** (`gui/vrp_run.py`, menu key `FleetProblem.VRP`, page `ui_vrp_params` built in code in
   `_build_vrp_page`): the waypoint table's `VRP` kind (role job/vehicle, name, amount = delivery or
   capacity, minutes of service, From/To as HH:MM = time window or shift, skills, vehicle mode).

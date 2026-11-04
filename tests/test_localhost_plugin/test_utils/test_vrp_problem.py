@@ -249,3 +249,10 @@ class TestProblem(unittest.TestCase):
         )
         self.assertNotIn("breaks", problem["vehicles"][0])
         self.assertEqual([j["id"] for j in problem["jobs"]], [0, 1])
+
+    def test_end_location(self):
+        fleet = [vrp.Vehicle("a", 0, "auto", end_location=2), vrp.Vehicle("b", 0, "auto")]
+        problem, keep, _ = vrp.build_vroom_problem(make_problem(fleet, [vrp.Job(1)]), False, MATRICES)
+        self.assertEqual(keep, [0, 1, 2])  # the end is kept though no job is there
+        self.assertEqual(problem["vehicles"][0]["end_index"], 2)
+        self.assertNotIn("end_index", problem["vehicles"][1])

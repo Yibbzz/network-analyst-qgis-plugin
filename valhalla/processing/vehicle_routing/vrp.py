@@ -309,6 +309,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             problem.shipments()  # validates the pairs before any request
         except ValueError as e:
             raise QgsProcessingException(str(e))
+        self._read_extra(parameters, context, problem)
         feedback.pushInfo(
             f"{len(problem.jobs)} jobs, {len(problem.vehicles)} vehicles ({', '.join(problem.profiles())})"
         )
@@ -354,27 +355,12 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         if len(unreachable) == len(problem.jobs):
             raise QgsProcessingException("No job can be reached by any vehicle")
 
-        try:
-            vroom_problem, keep, unplanned = build_vroom_problem(
-                problem, return_to_start, matrices, unreachable, plan=plan
-            )
-        except ValueError as e:
-            raise QgsProcessingException(str(e))
-
-        try:
-            solution = vroom.solve(
-                vroom_problem,
-                exploration_level=self.parameterAsInt(parameters, self.IN_EXPLORATION, context),
-                threads=self.parameterAsInt(parameters, self.IN_THREADS, context),
-                timeout=self.parameterAsInt(parameters, self.IN_TIMEOUT, context) or None,
-                plan=plan,
-                is_canceled=feedback.isCanceled,
-            )
-        except VroomError as e:
-            feedback.pushDebugInfo(e.detail)
-            raise QgsProcessingException(str(e))
-        if solution is None:  # canceled
+        solved = self._solve(
+            parameters, context, feedback, problem, matrices, unreachable, return_to_start, plan
+        )
+        if solved is None:  # canceled
             return {}
+        solution, keep, unplanned = solved
         feedback.setProgress(70)
         summary = solution.get("summary", {})
         feedback.pushInfo(
@@ -481,6 +467,55 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             self.OUT_STOPS: stops_dest,
             self.OUT_UNASSIGNED: unassigned_dest,
         }
+
+    def _read_extra(self, parameters, context, problem: Problem):
+        """Adds what a subclass needs beyond jobs & vehicles, e.g. landfills, before the matrices."""
+
+    def _vroom_solver(
+        self, parameters, context, feedback, plan: bool = False
+    ) -> Callable[[dict], Optional[dict]]:
+        """Solves one VROOM problem with this run's solver settings; None if canceled."""
+
+        def solve(vroom_problem: dict) -> Optional[dict]:
+            try:
+                return vroom.solve(
+                    vroom_problem,
+                    exploration_level=self.parameterAsInt(parameters, self.IN_EXPLORATION, context),
+                    threads=self.parameterAsInt(parameters, self.IN_THREADS, context),
+                    timeout=self.parameterAsInt(parameters, self.IN_TIMEOUT, context) or None,
+                    plan=plan,
+                    is_canceled=feedback.isCanceled,
+                )
+            except VroomError as e:
+                feedback.pushDebugInfo(e.detail)
+                raise QgsProcessingException(str(e))
+
+        return solve
+
+    def _solve(
+        self,
+        parameters,
+        context,
+        feedback,
+        problem: Problem,
+        matrices: Matrices,
+        unreachable: List[int],
+        return_to_start: bool,
+        plan: bool,
+    ) -> Optional[Tuple[dict, List[int], List[int]]]:
+        """
+        VROOM's solution, the location indices its ``location_index`` points into and the jobs
+        left out of plan mode; None if canceled.
+        """
+        try:
+            vroom_problem, keep, unplanned = build_vroom_problem(
+                problem, return_to_start, matrices, unreachable, plan=plan
+            )
+        except ValueError as e:
+            raise QgsProcessingException(str(e))
+
+        solution = self._vroom_solver(parameters, context, feedback, plan)(vroom_problem)
+        return None if solution is None else (solution, keep, unplanned)
 
     def _read_problem(  # noqa: C901 - one read per field
         self,

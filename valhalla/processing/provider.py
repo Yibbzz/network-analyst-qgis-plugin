@@ -62,6 +62,14 @@ from .vehicle_routing.vrp import (
     ValhallaVrpPedestrian,
     ValhallaVrpTruck,
 )
+from .vehicle_routing.waste import (
+    ValhallaWasteBicycle,
+    ValhallaWasteBus,
+    ValhallaWasteCar,
+    ValhallaWasteMotorcycle,
+    ValhallaWastePedestrian,
+    ValhallaWasteTruck,
+)
 
 
 class ValhallaProvider(QgsProcessingProvider):
@@ -117,6 +125,12 @@ class ValhallaProvider(QgsProcessingProvider):
                     ValhallaVrpPedestrian,
                     ValhallaVrpBicycle,
                     ValhallaVrpBus,
+                    ValhallaWasteTruck,
+                    ValhallaWasteCar,
+                    ValhallaWasteBus,
+                    ValhallaWasteMotorcycle,
+                    ValhallaWasteBicycle,
+                    ValhallaWastePedestrian,
                 )
             ],
         ]

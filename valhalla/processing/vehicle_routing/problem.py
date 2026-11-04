@@ -249,6 +249,8 @@ class Vehicle:
     break_window: Optional[List[int]] = None
     break_duration: Optional[int] = None
     feature: Any = None  # the input feature, for the outputs
+    # where the route ends; None = back at the start if returning, else wherever it ends
+    end_location: Optional[int] = None
 
 
 @dataclass
@@ -375,7 +377,11 @@ def build_vroom_problem(  # noqa: C901
         skip |= set(unplanned)
 
     tasks = [k for k in range(len(problem.jobs)) if k not in skip]
-    keep = sorted({v.location for v in problem.vehicles} | {problem.jobs[k].location for k in tasks})
+    keep = sorted(
+        {v.location for v in problem.vehicles}
+        | {v.end_location for v in problem.vehicles if v.end_location is not None}
+        | {problem.jobs[k].location for k in tasks}
+    )
     new_index = {old: new for new, old in enumerate(keep)}
 
     single = [k for k in tasks if problem.jobs[k].shipment_id is None]
@@ -400,7 +406,9 @@ def build_vroom_problem(  # noqa: C901
     vehicles = list()
     for i, v in enumerate(problem.vehicles):
         vehicle = {"id": i, "profile": v.profile, "start_index": new_index[v.location]}
-        if return_to_start:
+        if v.end_location is not None:
+            vehicle["end_index"] = new_index[v.end_location]
+        elif return_to_start:
             vehicle["end_index"] = new_index[v.location]
         if dims and has_capacity:
             vehicle["capacity"] = pad_amounts([v.capacity], dims)[0]
@@ -420,7 +428,7 @@ def build_vroom_problem(  # noqa: C901
             vehicle["steps"] = (
                 [{"type": "start"}]
                 + [{"type": types[k], "id": k} for _, k in steps]
-                + ([{"type": "end"}] if return_to_start else [])
+                + ([{"type": "end"}] if return_to_start or v.end_location is not None else [])
             )
         vehicles.append(vehicle)
 

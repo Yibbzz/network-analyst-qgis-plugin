@@ -1,0 +1,14 @@
+The <b>Waste Collection</b> algorithm plans collection rounds: each vehicle collects from its stops until it's full, empties out at the nearest <b>landfill</b>, and carries on with the next trip until the stops or its shift run out. Then it drives home. Solved by <a href="https://github.com/VROOM-Project/vroom">VROOM</a> on Valhalla time and distance matrices; install <i>pyvroom</i> in the plugin settings first.
+
+<b>Stops</b> are a point layer of bins or collection points. Optional fields set each stop's waste amount, service time (seconds), time window, required skills and priority.
+<b>Vehicles</b> are a point layer of depots. Optional fields set each vehicle's travel mode, capacity, shift, skills, maximum number of stops and one break.
+<b>Landfills</b> are a point layer of where vehicles empty out; set the time it takes to empty out.
+
+Amounts can have several dimensions as comma separated numbers, e.g. "120, 2" for kilograms and cubic meters; capacities use the same order. Times are seconds, "HH:MM[:SS]" text, or time / date-time fields. A trip never ends so late that the vehicle can't empty out and get home within its shift.
+
+Outputs:
+  1. <i>routes</i>: one line per vehicle through all its trips, with its number of stops, travel duration and distance, service time (emptying out included), start and end time,
+  2. <i>stops</i>: every step in order, the <i>landfill</i> visits included, with arrival, departure and the load after the step,
+  3. <i>unassigned</i>: stops no vehicle could take, either <i>unreachable</i> on the network or <i>not assigned</i>.
+
+How it's solved: VROOM has no landfill trips, so trips are planned in rounds. Each round gives every vehicle one more trip, from where it is to the landfill nearest to it, filled with as many stops as fit; the stops served are then taken out. It's a heuristic and doesn't move stops between trips afterwards. Stops are points: to collect along whole streets, put a point per street segment and its length's worth of service time on it.
