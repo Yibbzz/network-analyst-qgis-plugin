@@ -233,7 +233,7 @@ may spawn a python or call pip — `PYTHON_EXE` (the old, macOS-broken constant 
   so resolution keeps walking down the tiers instead of dead-ending on it, and if everything is
   too old the `PyPiError` names the versions it found and says a newer python needn't be the one
   QGIS runs on. `_get_python_candidates` also searches `$PATH` for explicitly versioned
-  `python3.{20..12}` (newest first), which is the only way out on a host whose QGIS python is
+  `python3.{20..12}` (newest first; `_PY_MINORS` must include the floor itself — it once didn't), which is the only way out on a host whose QGIS python is
   below the floor. **That host is real: QGIS 3.x's macOS bundle ships Python 3.9.5**
   (`config/ltr.conf` in qgis/QGIS-Mac-Packager, Qt 5.15.2) — so on `qgis-v3` + macOS the deps are
   installable *only* via a separately installed python. Windows/OSGeo4W is fine but has zero

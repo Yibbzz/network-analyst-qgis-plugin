@@ -73,7 +73,7 @@ IS_WIN = os.name == "nt"
 # needed, which is why we may pick an interpreter QGIS itself doesn't use.
 _PY_FLOOR = (3, 12)
 # newest first, so a $PATH search prefers a modern python over a barely-passing one
-_PY_MINORS = range(20, _PY_FLOOR[1], -1)
+_PY_MINORS = range(20, _PY_FLOOR[1] - 1, -1)
 
 
 class PyPiState(Enum):

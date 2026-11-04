@@ -81,6 +81,10 @@ class TestPyPi(unittest.TestCase):
         self.assertNotEqual(pypi.check_state(pypi.PYVALHALLA_PKG, None), pypi.PyPiState.UPGRADEABLE)
         self.assertNotEqual(pypi.check_state(pypi.SPOPT_PKG, None), pypi.PyPiState.UPGRADEABLE)
 
+    def test_path_search_includes_the_floor(self):
+        """A python3.12 that only lives on $PATH must be found (range() excludes its stop)."""
+        self.assertEqual(min(pypi._PY_MINORS), pypi._PY_FLOOR[1])
+
     def test_spopt_python_marker(self):
         """A spopt tree only counts as installed for the python it was installed for."""
         with TemporaryDirectory() as tmp:
