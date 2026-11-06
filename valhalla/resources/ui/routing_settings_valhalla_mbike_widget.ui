@@ -451,6 +451,9 @@
       </item>
       <item row="2" column="1">
        <widget class="QgsDoubleSpinBox" name="service_factor">
+        <property name="value">
+         <double>1.000000000000000</double>
+        </property>
         <property name="minimum">
          <double>0.100000000000000</double>
         </property>
