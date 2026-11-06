@@ -131,6 +131,19 @@ def pad_amounts(amounts: Sequence[Optional[List[int]]], dims: int) -> List[List[
     return [(a or []) + [0] * (dims - len(a or [])) for a in amounts]
 
 
+_LIMIT_RE = re.compile(r"Exceeded max locations:\s*(\d+(?:\.\d+)?)")
+
+
+def server_limit(message: Any) -> Optional[int]:
+    """
+    The limit in a Valhalla "too many locations" error (code 150), None for any other error.
+    For a matrix it's the max_matrix_location_pairs, for a route the max_locations, e.g. the
+    FOSSGIS server answers {'error_code': 150, 'error': 'Exceeded max locations: 100.000000'}.
+    """
+    match = _LIMIT_RE.search(str(message))
+    return int(float(match.group(1))) if match else None
+
+
 def matrix_row_chunks(n_locations: int, max_pairs: int) -> List[List[int]]:
     """
     The source rows per matrix request so that rows x all targets stay within Valhalla's

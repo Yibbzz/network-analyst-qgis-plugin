@@ -6,7 +6,7 @@ The <b>Vehicle Routing Problem</b> (VRP) algorithm assigns jobs to a fleet of ve
 <b>Mixed fleets</b>: each travel mode gets its own Valhalla matrix and route lines. The costing options in <i>Advanced Parameters</i> only apply to this algorithm's own travel mode; other vehicles use Valhalla's defaults.
 <b>Pickup and delivery</b> (advanced): two jobs with the same <i>shipment ID</i>, one with role <i>pickup</i> and one <i>delivery</i>, are carried by one vehicle, pickup first. The shipment's amount is the delivery amount of either job.
 <b>Assigned vehicle</b> (advanced): keeps a job on that vehicle (its vehicle ID) and re-optimises everything else, e.g. after a change of plan.
-<b>Keep the order</b> (advanced): with the assigned vehicle and <i>sequence</i> fields set, the routes are kept exactly as given and only their times are computed. Jobs without a vehicle or sequence are unassigned; anything the order breaks (late arrivals, overloads) is listed in the <i>violations</i> fields. Breaks are left out.
+<b>Keep the order</b> (advanced): with the assigned vehicle and <i>sequence</i> fields set, the routes are kept exactly as given and only their times are computed. Jobs without a vehicle or sequence are unassigned; anything the order breaks (late arrivals, overloads) is listed in the <i>violations</i> fields (<i>lead_time</i> = the vehicle would have to leave before its shift starts to make a time window). Vehicles without jobs get no route. Breaks are left out.
 
 Amounts can have several dimensions as comma separated numbers, e.g. "500, 2" for kilograms and pallets; all jobs and vehicles must use the same order. Skills are comma separated integers: a job only goes to a vehicle with all its skills.
 Times are seconds, "HH:MM[:SS]" text, or time / date-time fields (from midnight / the Unix epoch). Use one kind for all times in a run.
@@ -16,4 +16,4 @@ Outputs:
   2. <i>stops</i>: every step in order (start, jobs, breaks, end) with arrival, departure, waiting and load after the step,
   3. <i>unassigned</i>: jobs no vehicle could take: <i>unreachable</i> on the network, <i>not assigned</i> by the solver (capacity, time windows, skills) or, when keeping the order, <i>no vehicle or sequence</i>.
 
-The matrix and the route lines respect your Valhalla server's limits (<i>Advanced Parameters</i>): 2500 matrix pairs and 20 route locations per request are Valhalla's defaults. VROOM uses one fixed matrix, so travel times don't change with the time of day.
+The matrix and the route lines are split into requests within your Valhalla server's limits (<i>Advanced Parameters</i>): 2500 matrix pairs and 20 route locations per request are Valhalla's defaults. If the server allows fewer (the public FOSSGIS server allows 100 matrix pairs), it says so in its error and the requests are automatically redone within its limit, with a warning in the log. VROOM uses one fixed matrix, so travel times don't change with the time of day.

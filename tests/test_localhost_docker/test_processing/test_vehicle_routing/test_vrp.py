@@ -308,6 +308,8 @@ class TestVrp(LocalhostDockerTestCase):
         late = [s for s in out["stops"] if s["name"] == "job 0"][0]
         self.assertIn("delay", late["violations"])
         self.assertIn("delay", out["routes"][0]["violations"])
+        # like a solve, vehicle b without jobs gets no (empty start-end) route
+        self.assertEqual([f["vid"] for f in out["routes"]], ["a"])
 
     def test_keep_order_needs_fields(self):
         with self.assertRaisesRegex(QgsProcessingException, "sequence"):

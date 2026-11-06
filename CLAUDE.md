@@ -386,6 +386,14 @@ copied), unassigned (reason `unreachable` or `not assigned`).
 - **Server limits**: Valhalla's defaults are 2500 matrix pairs and 20 route locations per request.
   The matrix is requested in chunks of source rows (`matrix_row_chunks`), route lines in chunks
   that share their end/start stop (`route_chunks`); both limits are advanced parameters.
+  They're only a first guess: a server that allows fewer answers error 150 `Exceeded max
+  locations: N` (N = its pairs limit for a matrix, e.g. FOSSGIS `100.000000`; its
+  `max_locations` for a route), `problem.server_limit` parses N, `_request` raises
+  `ServerLimitError`, and the matrix is redone / the route re-chunked within N (a warning in the
+  log; later routes keep the lowered limit). This is what makes the **dock** work on FOSSGIS: it
+  has no limit fields and always starts from the defaults. Reproduce locally by lowering
+  `service_limits.<costing>.max_matrix_location_pairs` / `max_locations` in the docker
+  container's `valhalla.json` (files are root-owned: `docker cp`) and restarting it.
 - **Unroutable cells**: a job no vehicle can get to (and back from, if returning) is left out of
   the problem and reported `unreachable`; any other NULL cell becomes `UNROUTABLE` (~115 days).
 - **IDs**: vehicle i / job k get VROOM id i / k (list positions); VROOM's `location_index` points
@@ -406,6 +414,10 @@ copied), unassigned (reason `unreachable` or `not assigned`).
 - **Keep the order (plan mode)**: vehicles get VROOM `steps` from the sequence field and the runner
   calls `Input.check()` instead of `solve()` (`SolveRequest.plan`): times + `violations` only.
   Breaks not listed in the steps are silently dropped by VROOM, so they're left out with a warning.
+  `check()` also returns every vehicle without a job as an empty start-end route; those are
+  dropped right after the solve (a `solve()` leaves unused vehicles out), so both modes match.
+  A schedule that only works by leaving before the shift shows as `lead_time` (on the start
+  stop and the route), not as lateness on a job.
 - Tests: `test_vrp_problem.py` (no valhalla), `test_vroom.py` (the runner), and the algorithm
   against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
 - **Waste collection** (`vehicle_routing/waste.py`, `valhalla:valhalla_waste_<profile>`): the VRP

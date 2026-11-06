@@ -54,6 +54,7 @@ from .problem import (
     matrix_row_chunks,
     route_chunks,
     seconds_to_hms,
+    server_limit,
     time_window,
     to_amount,
     to_int,
@@ -103,6 +104,14 @@ def violations_text(violations: List[dict]) -> Optional[str]:
         f"{v['cause']} {v['duration']} s" if v.get("duration") else v["cause"] for v in violations or []
     ]
     return ", ".join(parts) or None
+
+
+class ServerLimitError(QgsProcessingException):
+    """The server refused a request for too many locations; ``limit`` is what it allows."""
+
+    def __init__(self, message: str, limit: int):
+        super().__init__(message)
+        self.limit = limit
 
 
 class ValhallaVrpBase(ValhallaBaseAlgorithm):
@@ -242,8 +251,20 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             (self.IN_EXPLORATION, "Solver exploration level (1 fast to 5 thorough)", 5, 1, 5),
             (self.IN_TIMEOUT, "Solver time limit in seconds (0 = none)", 0, 0, None),
             (self.IN_THREADS, "Solver threads", 4, 1, 64),
-            (self.IN_MAX_PAIRS, "Max matrix pairs per request (the server's limit)", 2500, 1, None),
-            (self.IN_MAX_LOCATIONS, "Max locations per route request (the server's limit)", 20, 2, None),
+            (
+                self.IN_MAX_PAIRS,
+                "Max matrix pairs per request (lowered automatically if the server allows fewer)",
+                2500,
+                1,
+                None,
+            ),
+            (
+                self.IN_MAX_LOCATIONS,
+                "Max locations per route request (lowered automatically if the server allows fewer)",
+                20,
+                2,
+                None,
+            ),
         ):
             param = QgsProcessingParameterNumber(
                 name,
@@ -314,36 +335,13 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             f"{len(problem.jobs)} jobs, {len(problem.vehicles)} vehicles ({', '.join(problem.profiles())})"
         )
 
+        # the route lines adapt this to the server's limit, see _route_geometry
+        self._max_locations = max_locations
+
         # 1. a matrix between all locations per travel mode, in chunks of source rows
-        try:
-            chunks = matrix_row_chunks(len(problem.coords), max_pairs)
-        except ValueError as e:
-            raise QgsProcessingException(str(e))
-        matrices: Matrices = dict()
-        all_targets = list(range(len(problem.coords)))
-        n_requests, done = len(chunks) * len(problem.profiles()), 0
-        for profile in problem.profiles():
-            durations: List[List[Optional[float]]] = list()
-            distances: List[List[Optional[float]]] = list()
-            with self._profile(results_factory, profile):
-                for rows in chunks:
-                    if feedback.isCanceled():
-                        return {}
-                    matrix = self._request(
-                        results_factory,
-                        RouterEndpoint.MATRIX,
-                        problem.coords,
-                        {
-                            **self._profile_params(params, profile),
-                            "sources": rows,
-                            "destinations": all_targets,
-                        },
-                    )
-                    durations.extend(matrix.durations)
-                    distances.extend(matrix.distances)
-                    done += 1
-                    feedback.setProgress(int(40 * done / n_requests))
-            matrices[profile] = (durations, distances)
+        matrices = self._matrices(results_factory, problem, params, max_pairs, feedback)
+        if matrices is None:
+            return {}
 
         # 2. solve, without the jobs no vehicle can get to
         unreachable = unreachable_jobs(problem, matrices, return_to_start)
@@ -362,9 +360,16 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             return {}
         solution, keep, unplanned = solved
         feedback.setProgress(70)
+        # plan mode (VROOM's check) also returns every vehicle without a job, as an empty
+        # start-end route; a solve leaves unused vehicles out: match that
+        solution["routes"] = [
+            r
+            for r in solution.get("routes", [])
+            if any(s.get("type") in JOB_STEPS for s in r.get("steps", []))
+        ]
         summary = solution.get("summary", {})
         feedback.pushInfo(
-            f"VROOM: {summary.get('routes', 0)} routes, {summary.get('unassigned', 0)} jobs unassigned"
+            f"VROOM: {len(solution['routes'])} routes, {summary.get('unassigned', 0)} jobs unassigned"
         )
         if plan and (violations := violations_text(summary.get("violations"))):
             feedback.reportError(f"The kept routes break constraints: {violations}", fatalError=False)
@@ -390,7 +395,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                     self._profile_params(params, vehicle.profile),
                     problem.coords,
                     stop_locations,
-                    max_locations,
+                    feedback,
                 )
             route_feat = QgsFeature(routes_fields)
             veh_attrs = vehicle.feature.attributes()
@@ -709,9 +714,31 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         params: dict,
         coords: List[Tuple[float, float]],
         stop_locations: List[int],
+        feedback: QgsProcessingFeedback,
+    ) -> Tuple[Optional[QgsGeometry], Optional[float]]:
+        """
+        One line through the stops in order, routed in chunks; its length in meters. A server
+        that allows fewer locations per route says so in its error: then retried within it,
+        and the later routes use that limit straight away.
+        """
+        while True:
+            try:
+                return self._route_in_chunks(
+                    results_factory, params, coords, stop_locations, self._max_locations
+                )
+            except ServerLimitError as e:
+                self._max_locations = self._smaller_limit(
+                    e, self._max_locations, 2, "route locations", feedback
+                )
+
+    def _route_in_chunks(
+        self,
+        results_factory,
+        params: dict,
+        coords: List[Tuple[float, float]],
+        stop_locations: List[int],
         max_locations: int,
     ) -> Tuple[Optional[QgsGeometry], Optional[float]]:
-        """One line through the stops in order, routed in chunks; its length in meters."""
         points: List[QgsPointXY] = list()
         distance = 0.0
         chunks = route_chunks(stop_locations, max_locations)
@@ -728,6 +755,67 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
 
         return QgsGeometry.fromPolylineXY(points), distance
 
+    def _matrices(
+        self, results_factory, problem: Problem, params: dict, max_pairs: int, feedback
+    ) -> Optional[Matrices]:
+        """
+        A matrix between all locations per travel mode, in chunks of source rows; None if
+        canceled. ``max_pairs`` is only a first guess (Valhalla's default): a server that
+        allows fewer says so in its error, e.g. FOSSGIS' 100, and it's all redone within that.
+        """
+        while True:
+            try:
+                chunks = matrix_row_chunks(len(problem.coords), max_pairs)
+            except ValueError as e:
+                raise QgsProcessingException(str(e))
+            try:
+                return self._matrices_in_chunks(results_factory, problem, params, chunks, feedback)
+            except ServerLimitError as e:
+                max_pairs = self._smaller_limit(e, max_pairs, 1, "matrix pairs", feedback)
+
+    def _matrices_in_chunks(
+        self, results_factory, problem: Problem, params: dict, chunks: List[List[int]], feedback
+    ) -> Optional[Matrices]:
+        matrices: Matrices = dict()
+        all_targets = list(range(len(problem.coords)))
+        n_requests, done = len(chunks) * len(problem.profiles()), 0
+        for profile in problem.profiles():
+            durations: List[List[Optional[float]]] = list()
+            distances: List[List[Optional[float]]] = list()
+            with self._profile(results_factory, profile):
+                for rows in chunks:
+                    if feedback.isCanceled():
+                        return None
+                    matrix = self._request(
+                        results_factory,
+                        RouterEndpoint.MATRIX,
+                        problem.coords,
+                        {
+                            **self._profile_params(params, profile),
+                            "sources": rows,
+                            "destinations": all_targets,
+                        },
+                    )
+                    durations.extend(matrix.durations)
+                    distances.extend(matrix.distances)
+                    done += 1
+                    feedback.setProgress(int(40 * done / n_requests))
+            matrices[profile] = (durations, distances)
+        return matrices
+
+    @staticmethod
+    def _smaller_limit(
+        error: "ServerLimitError", current: int, minimum: int, what: str, feedback
+    ) -> int:
+        """The server's limit to retry with, or the error again if retrying can't help."""
+        if not minimum <= error.limit < current:
+            raise error
+        feedback.pushWarning(
+            f"The server allows {error.limit} {what} per request, not {current}: "
+            "retrying with smaller requests"
+        )
+        return error.limit
+
     @staticmethod
     def _request(results_factory, endpoint: RouterEndpoint, coords, params: dict):
         try:
@@ -736,6 +824,9 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             routingpy.exceptions.RouterApiError,
             routingpy.exceptions.RouterServerError,
         ) as e:
+            limit = server_limit(e.message)
+            if limit is not None:
+                raise ServerLimitError(f"HTTP {e.status}: {e.message}", limit)
             raise QgsProcessingException(f"HTTP {e.status}: {e.message}")
 
     def group(self):

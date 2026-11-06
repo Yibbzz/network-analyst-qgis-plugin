@@ -60,6 +60,20 @@ class TestParsing(unittest.TestCase):
 
 
 class TestChunks(unittest.TestCase):
+    def test_server_limit(self):
+        # as routingpy hands over FOSSGIS' answer: a dict, the limit printed as a float
+        fossgis = {
+            "error_code": 150,
+            "error": "Exceeded max locations: 100.000000",
+            "status_code": 400,
+            "status": "Bad Request",
+        }
+        self.assertEqual(vrp.server_limit(fossgis), 100)
+        self.assertEqual(vrp.server_limit('{"error_code":150,"error":"Exceeded max locations: 20"}'), 20)
+        no_edges = {"error_code": 171, "error": "No suitable edges near location"}
+        self.assertIsNone(vrp.server_limit(no_edges))
+        self.assertIsNone(vrp.server_limit(None))
+
     def test_matrix_row_chunks(self):
         self.assertEqual(vrp.matrix_row_chunks(5, 2500), [[0, 1, 2, 3, 4]])
         self.assertEqual(vrp.matrix_row_chunks(5, 10), [[0, 1], [2, 3], [4]])
