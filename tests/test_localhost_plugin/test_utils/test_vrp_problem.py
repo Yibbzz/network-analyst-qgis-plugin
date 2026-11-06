@@ -59,6 +59,30 @@ class TestParsing(unittest.TestCase):
         self.assertIsNone(vrp.seconds_to_hms(1_700_000_000))  # epoch, not a time of day
 
 
+class TestTimeKinds(unittest.TestCase):
+    def problem(self, job_window, shift):
+        return vrp.Problem(
+            vehicles=[vrp.Vehicle("v", 0, "auto", shift=shift)],
+            jobs=[vrp.Job(0, window=job_window, label="Job a")],
+        )
+
+    def test_one_kind(self):
+        day = 1_793_952_000
+        for window, shift in (
+            ([9 * 3600, 12 * 3600], [8 * 3600, 18 * 3600]),  # times of day
+            ([day + 9 * 3600, day + 12 * 3600], [day, day + 86400]),  # dates
+            ([0, vrp.OPEN_END], [day, day + 86400]),  # open window: either kind
+            ([0, 12 * 3600], None),
+        ):
+            with self.subTest(window=window, shift=shift):
+                vrp.check_time_kinds(self.problem(window, shift))
+
+    def test_mixed(self):
+        day = 1_793_952_000
+        with self.assertRaisesRegex(ValueError, "mix times of day .Vehicle v. and dates .Job a."):
+            vrp.check_time_kinds(self.problem([day + 9 * 3600, day + 12 * 3600], [8 * 3600, 18 * 3600]))
+
+
 class TestChunks(unittest.TestCase):
     def test_server_limit(self):
         # as routingpy hands over FOSSGIS' answer: a dict, the limit printed as a float

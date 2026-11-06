@@ -50,6 +50,7 @@ from .problem import (
     Problem,
     Vehicle,
     build_vroom_problem,
+    check_time_kinds,
     is_null,
     matrix_row_chunks,
     route_chunks,
@@ -328,6 +329,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             raise QgsProcessingException("The vehicles layer has no features")
         try:
             problem.shipments()  # validates the pairs before any request
+            check_time_kinds(problem)
         except ValueError as e:
             raise QgsProcessingException(str(e))
         self._read_extra(parameters, context, problem)

@@ -119,9 +119,13 @@ def time_window(start: Optional[int], end: Optional[int]) -> Optional[List[int]]
     return [start, end]
 
 
+# seconds from here on are dates (epoch), below times of day / durations
+_EPOCH_FROM = 10 * 86400
+
+
 def seconds_to_hms(seconds: Optional[int]) -> Optional[str]:
     """HH:MM:SS for durations and times of day; None for epoch times (> 10 days)."""
-    if seconds is None or seconds < 0 or seconds >= 10 * 86400:
+    if seconds is None or seconds < 0 or seconds >= _EPOCH_FROM:
         return None
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
@@ -129,6 +133,30 @@ def seconds_to_hms(seconds: Optional[int]) -> Optional[str]:
 def pad_amounts(amounts: Sequence[Optional[List[int]]], dims: int) -> List[List[int]]:
     """VROOM wants every amount with the same number of dimensions."""
     return [(a or []) + [0] * (dims - len(a or [])) for a in amounts]
+
+
+def check_time_kinds(problem: "Problem"):
+    """
+    All times must be one kind: times of day (seconds, HH:MM, time fields) or dates (date-time
+    fields, epoch seconds). Mixed, a 09:00 shift and a window on a date never overlap, and the
+    jobs would quietly end up unassigned.
+
+    :raises ValueError: if both kinds are used
+    """
+    day_times, dates = list(), list()
+    windows = [(j.label, j.window) for j in problem.jobs]
+    windows += [(f"Vehicle {v.vehicle_id}", v.shift) for v in problem.vehicles]
+    windows += [(f"Vehicle {v.vehicle_id}'s break", v.break_window) for v in problem.vehicles]
+    for label, window in windows:
+        for value in window or ():
+            if value in (0, OPEN_END):  # an open side, or midnight: either kind
+                continue
+            (dates if value >= _EPOCH_FROM else day_times).append(label)
+    if day_times and dates:
+        raise ValueError(
+            f"Times mix times of day ({day_times[0]}) and dates ({dates[0]}): use either "
+            "HH:MM / seconds / time fields everywhere, or date-time fields everywhere"
+        )
 
 
 _LIMIT_RE = re.compile(r"Exceeded max locations:\s*(\d+(?:\.\d+)?)")

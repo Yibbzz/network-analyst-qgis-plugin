@@ -405,7 +405,8 @@ copied), unassigned (reason `unreachable` or `not assigned`).
 - **IDs**: vehicle i / job k get VROOM id i / k (list positions); VROOM's `location_index` points
   into the submatrix `keep` that `build_vroom_problem` returns.
 - **Attributes**: times = seconds, `HH:MM[:SS]`, QTime (from midnight) or QDateTime (epoch) — one
-  kind per run; amounts/skills = a number or comma separated numbers; missing amount dimensions
+  kind per run (`check_time_kinds` raises on a mix: a 09:00 shift never meets a dated window, the jobs
+  would silently be unassigned); amounts/skills = a number or comma separated numbers; missing amount dimensions
   are padded with 0; amounts without a vehicle capacity are an error, not silently dropped.
 - **The problem as plain data** is `processing/vehicle_routing/problem.py` (`Problem`/`Vehicle`/
   `Job`, attribute parsing, `build_vroom_problem`, request chunking), no layers or Valhalla; blank
