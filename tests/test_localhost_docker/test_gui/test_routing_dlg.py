@@ -125,7 +125,7 @@ class TestRoutingDialog(unittest.TestCase):
         """Items map to pages and table kinds by key, the separator isn't selectable."""
         from valhalla.core.spopt import SpoptProblem
         from valhalla.gui.dock_routing import MENU
-        from valhalla.gui.widgets.waypoint_model import ROUTING, SPOPT
+        from valhalla.gui.widgets.waypoint_model import ROUTING, SPOPT, VRP
 
         menu = self.dlg.menu_widget
         self.assertEqual(menu.count(), len(MENU))
@@ -139,12 +139,12 @@ class TestRoutingDialog(unittest.TestCase):
             self.assertIs(
                 self.dlg.ui_params_stacked.currentWidget(), getattr(self.dlg, entry.stacked_page_name)
             )
-            self.assertIs(self.dlg.waypoints_widget.model.kind, entry.kind)
+            self.assertIs(self.dlg.waypoints_widget.table_model.table_kind, entry.kind)
             self.assertTrue(self.dlg.windowTitle().endswith(entry.window_title))
             if entry.endpoint_key == SpoptProblem.LSCP:
                 self.assertTrue(self.dlg.ui_spopt_n_fac.isHidden())
             elif entry.endpoint_key == SpoptProblem.MCLP:
                 self.assertFalse(self.dlg.ui_spopt_n_fac.isHidden())
 
-        self.assertEqual({e.kind.name for e in MENU if e}, {ROUTING.name, SPOPT.name})
+        self.assertEqual({e.kind.name for e in MENU if e}, {ROUTING.name, SPOPT.name, VRP.name})
         menu.setCurrentRow(0)

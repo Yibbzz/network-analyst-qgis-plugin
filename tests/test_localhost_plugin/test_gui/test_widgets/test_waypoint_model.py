@@ -95,7 +95,7 @@ class TestWaypointModel(unittest.TestCase):
 
         flag = self.model.index(0, 1)
         self.assertTrue(self.model.flags(flag) & Qt.ItemFlag.ItemIsUserCheckable)
-        self.model.setData(flag, Qt.CheckState.Checked.value, Qt.ItemDataRole.CheckStateRole)
+        self.model.setData(flag, Qt.CheckState.Checked, Qt.ItemDataRole.CheckStateRole)
         self.assertEqual(self.model.data(flag, Qt.ItemDataRole.CheckStateRole), Qt.CheckState.Checked)
 
         self.model.set_kind(ROUTING)

@@ -53,8 +53,10 @@ class TestWaypointsWidget(LocalhostDockerTestCase):
 
     def add_waypoints(self, points):
         """adds waypoints to the table"""
-        # click the add button which should hide the dialog
-        QTest.mouseClick(self.dlg.waypoints_widget.ui_btn_add_pt, Qt.MouseButton.LeftButton)
+        # click the add button which should hide the dialog; click() rather than a mouse click
+        # in its middle: a kind with add modes gives it a menu arrow, which a click there would
+        # open (and wait in) instead
+        self.dlg.waypoints_widget.ui_btn_add_pt.click()
         self.assertTrue(self.dlg.isVisible())
         sleep(0.2)
 
@@ -400,8 +402,8 @@ class TestWaypointsWidget(LocalhostDockerTestCase):
         self.add_waypoints(WAYPOINTS_3857[:1])
 
         widget.set_kind(SPOPT)
-        self.assertEqual(widget.model.rowCount(), 0)
-        self.assertEqual(widget.model.columnCount(), len(SPOPT.columns))
+        self.assertEqual(widget.table_model.rowCount(), 0)
+        self.assertEqual(widget.table_model.columnCount(), len(SPOPT.columns))
         self.add_waypoints(WAYPOINTS_3857)
         self.assertEqual([wp.attrs["role"] for wp in widget.waypoints], ["demand"] * 3)
 
@@ -413,7 +415,7 @@ class TestWaypointsWidget(LocalhostDockerTestCase):
         self.assertFalse(root.findLayer(routing_lyr.id()).isVisible())
 
         widget.set_kind(ROUTING)
-        self.assertEqual(widget.model.rowCount(), 1)
+        self.assertEqual(widget.table_model.rowCount(), 1)
         self.assertTrue(root.findLayer(routing_lyr.id()).isVisible())
         self.assertFalse(root.findLayer(spopt_lyr.id()).isVisible())
         # the routing requests only ever see routing points
@@ -453,8 +455,8 @@ class TestWaypointsWidget(LocalhostDockerTestCase):
                 widget._handle_clear_locations()
             QgsProject.instance().read(project_file.name)
 
-        self.assertEqual(widget.models[ROUTING.name].waypoints[0].attrs["radius"], 42)
-        facility, demand = widget.models[SPOPT.name].waypoints
+        self.assertEqual(widget.table_models[ROUTING.name].waypoints[0].attrs["radius"], 42)
+        facility, demand = widget.table_models[SPOPT.name].waypoints
         self.assertEqual(
             (facility.attrs["role"], facility.attrs["name"], facility.attrs["predefined"]),
             ("facility", "depot", True),
@@ -470,7 +472,7 @@ class TestWaypointsWidget(LocalhostDockerTestCase):
         QgsProject.instance().removeEntry(PROJECT_SCOPE, "waypoints")
 
         widget._handle_read_project()
-        self.assertEqual(widget.model.rowCount(), 3)
+        self.assertEqual(widget.table_model.rowCount(), 3)
         # an annotation layer doesn't keep the order: the reason the points are stored now
         restored = sorted((wp.lon, wp.lat) for wp in widget.waypoints)
         for (lon, lat), (exp_lon, exp_lat) in zip(restored, sorted(WAYPOINTS_4326)):
@@ -484,7 +486,7 @@ class TestWaypointsWidget(LocalhostDockerTestCase):
         QgsProject.instance().clear()
         # a cleared project resets the canvas CRS the other tests rely on
         CANVAS.setDestinationCrs(QgsCoordinateReferenceSystem.fromEpsgId(3857))
-        self.assertEqual(widget.model.rowCount(), 0)
+        self.assertEqual(widget.table_model.rowCount(), 0)
 
     def test_from_layer_spopt(self):
         """A layer import as demand points or facilities, with fields mapped to columns."""
