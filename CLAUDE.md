@@ -463,6 +463,13 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   if jobs have amounts). Routes and stops get one color per vehicle (`style_by_vehicle`).
   Non-fatal warnings (unreachable jobs) come back in `VrpRun.warnings`. Test:
   `tests/test_localhost_docker/test_gui/test_vrp_run.py`.
+  **Advanced columns** (`Column.advanced=True`, hidden until the page's "Show advanced columns";
+  `WaypointsWidget.set_show_advanced` hides them by index and switches the header from Stretch
+  to Interactive so the wide table scrolls): jobs' Priority, Vehicle (lock, by vehicle *name*),
+  Order (sequence), Shipment + Pickup/Drop; vehicles' Max jobs and Break from/to/minutes. 0 or
+  empty = not set (`_positive`). "Keep the order" ticks the advanced columns on (it needs
+  Vehicle + Order). The break fields are only mapped when a vehicle has a break, else plan
+  mode would always warn that breaks are left out.
 - Layer imports into a TEXT column turn QTime/QDateTime into `HH:mm:ss` (`_from_field`), not
   Python's repr — the VRP's From/To columns read that.
 
@@ -481,9 +488,9 @@ The dock's waypoint table is model/view, not `QTableWidget` + cell widgets:
   `TableKind` also declares `add_modes` (`AddMode(name, plural, attrs)`: the add button becomes
   a menu, the canvas context menu gets one entry each), `layer_fields` (the From-layer dialog
   maps layer fields to columns + asks the mode), `routing_imports` (Valhalla JSON/OSRM URL).
-- **Separate points per kind**: `WaypointsWidget.models[kind]` + one annotation layer each;
+- **Separate points per kind**: `WaypointsWidget.table_models[kind]` + one annotation layer each;
   `set_kind` swaps the view's model and shows only that kind's markers. Routing requests
-  always read `models["routing"]`, whatever is shown.
+  always read `table_models["routing"]`, whatever is shown.
 - **Points live in the project**: every model change writes
   `QgsProject.writeEntry("valhalla", "waypoints/<kind>", json)`; `projectRead` and `cleared`
   (new project → empty tables) restore. Annotation layers are only visual. Fallback for
@@ -494,7 +501,10 @@ The dock's waypoint table is model/view, not `QTableWidget` + cell widgets:
   open (the old cell-widget look) — it commits on every change since it never closes. A
   persistent editor is a widget per cell: don't use it for big tables.
 - Code and tests go through `waypoints_widget.add_waypoint(lon, lat, **attrs)`,
-  `.waypoints`, `.model` — **no column indices** (the old code hardcoded 0–4 everywhere).
+  `.waypoints`, `.table_model` (its `.table_kind`) — **no column indices** (the old code hardcoded 0–4 everywhere).
+- **Test gotcha**: a kind with add modes turns the add button into a `MenuButtonPopup`; a
+  `QTest.mouseClick` in its middle can hit the arrow under offscreen and block forever in the
+  menu's `exec`. Press it with `ui_btn_add_pt.click()`.
 - `tests/…/test_waypoint_model.py` runs Qt's `QAbstractItemModelTester` (Warning mode, failures
   collected via `qInstallMessageHandler` — Fatal mode just core-dumps the test process).
 

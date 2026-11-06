@@ -54,6 +54,8 @@ class Column:
     persistent: bool = False
     # whether the column applies to a row (by its attributes), else it's blank & read-only
     applies: Optional[Callable[[Dict[str, Any]], bool]] = None
+    # hidden unless the table shows its advanced columns (WaypointsWidget.set_show_advanced)
+    advanced: bool = False
 
     def applies_to(self, attrs: Dict[str, Any]) -> bool:
         return self.applies is None or self.applies(attrs)
@@ -276,6 +278,94 @@ VRP = WaypointTableKind(
             VRP_MODES,
             applies=_is_vrp_role(VrpRole.VEHICLE),
         ),
+        # the advanced columns, hidden unless the VRP page shows them
+        Column(
+            "priority",
+            "Priority",
+            ColumnKind.INT,
+            0,
+            "0 to 100: when not every job can be served, higher ones are served first",
+            maximum=100,
+            applies=_is_vrp_role(VrpRole.JOB),
+            advanced=True,
+        ),
+        Column(
+            "vehicle",
+            "Vehicle",
+            ColumnKind.TEXT,
+            "",
+            "Keeps the job on the vehicle with this name, empty for any",
+            applies=_is_vrp_role(VrpRole.JOB),
+            advanced=True,
+        ),
+        Column(
+            "order",
+            "Order",
+            ColumnKind.INT,
+            0,
+            "The job's position on its vehicle (1, 2, …), for 'Keep the order'; 0 = none",
+            maximum=1e6,
+            applies=_is_vrp_role(VrpRole.JOB),
+            advanced=True,
+        ),
+        Column(
+            "shipment",
+            "Shipment",
+            ColumnKind.TEXT,
+            "",
+            "Two jobs with the same shipment ID are one load: picked up at one, delivered at the "
+            "other, by the same vehicle",
+            applies=_is_vrp_role(VrpRole.JOB),
+            advanced=True,
+        ),
+        Column(
+            "shipment_role",
+            "Pickup/Drop",
+            ColumnKind.CHOICE,
+            "",
+            "Whether a shipment's job is where the load is picked up or delivered",
+            ("", "pickup", "delivery"),
+            applies=_is_vrp_role(VrpRole.JOB),
+            advanced=True,
+        ),
+        Column(
+            "max_jobs",
+            "Max jobs",
+            ColumnKind.INT,
+            0,
+            "The most jobs the vehicle may do, 0 = no limit",
+            maximum=1e6,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "break_start",
+            "Break from",
+            ColumnKind.TEXT,
+            "",
+            f"Earliest start of the vehicle's break, {_TIME_TIP}",
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "break_end",
+            "Break to",
+            ColumnKind.TEXT,
+            "",
+            f"Latest start of the vehicle's break, {_TIME_TIP}",
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "break_minutes",
+            "Break min",
+            ColumnKind.FLOAT,
+            0.0,
+            "How long the break lasts in minutes, 0 = no break",
+            maximum=1e4,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
     ),
     ann_layer_name=f"{PLUGIN_NAME} Jobs & Vehicles",
     marker=lambda _, __, wp: (
@@ -292,6 +382,15 @@ VRP = WaypointTableKind(
         LayerField("start", "From (HH:MM)"),
         LayerField("end", "To (HH:MM)"),
         LayerField("skills", "Skills"),
+        LayerField("priority", "Priority (0-100)", numeric=True),
+        LayerField("vehicle", "Assigned vehicle (name)"),
+        LayerField("order", "Order on its vehicle", numeric=True),
+        LayerField("shipment", "Shipment ID"),
+        LayerField("shipment_role", "Pickup/Drop (pickup or delivery)"),
+        LayerField("max_jobs", "Max jobs (vehicles)", numeric=True),
+        LayerField("break_start", "Break from (HH:MM)"),
+        LayerField("break_end", "Break to (HH:MM)"),
+        LayerField("break_minutes", "Break minutes", numeric=True),
     ),
 )
 

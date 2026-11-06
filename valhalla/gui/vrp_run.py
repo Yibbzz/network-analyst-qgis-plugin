@@ -75,6 +75,12 @@ def _text(value) -> Optional[str]:
     return str(value).strip() or None if value is not None else None
 
 
+def _positive(value, scale: float = 1) -> Optional[int]:
+    """A count/duration from the table, None for 0 (= not set)."""
+    number = int(round(float(value or 0) * scale))
+    return number if number > 0 else None
+
+
 def jobs_layer(jobs: List[Waypoint], with_amounts: bool) -> QgsVectorLayer:
     layer = QgsVectorLayer("Point?crs=EPSG:4326", "jobs", "memory")
     layer.dataProvider().addAttributes(
@@ -85,6 +91,11 @@ def jobs_layer(jobs: List[Waypoint], with_amounts: bool) -> QgsVectorLayer:
             QgsField("tw_start", QVariant.String),
             QgsField("tw_end", QVariant.String),
             QgsField("skills", QVariant.String),
+            QgsField("priority", QVariant.Int),
+            QgsField("vehicle", QVariant.String),
+            QgsField("sequence", QVariant.Int),
+            QgsField("shipment", QVariant.String),
+            QgsField("shipment_role", QVariant.String),
         ]
     )
     layer.updateFields()
@@ -99,6 +110,11 @@ def jobs_layer(jobs: List[Waypoint], with_amounts: bool) -> QgsVectorLayer:
                 _text(wp.attrs.get("start")),
                 _text(wp.attrs.get("end")),
                 _text(wp.attrs.get("skills")),
+                _positive(wp.attrs.get("priority")),
+                _text(wp.attrs.get("vehicle")),
+                _positive(wp.attrs.get("order")),
+                _text(wp.attrs.get("shipment")),
+                _text(wp.attrs.get("shipment_role")),
             ]
         )
         feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(wp.lon, wp.lat)))
@@ -117,6 +133,10 @@ def vehicles_layer(vehicles: List[Waypoint], with_amounts: bool) -> QgsVectorLay
             QgsField("shift_end", QVariant.String),
             QgsField("skills", QVariant.String),
             QgsField("mode", QVariant.String),
+            QgsField("max_jobs", QVariant.Int),
+            QgsField("break_start", QVariant.String),
+            QgsField("break_end", QVariant.String),
+            QgsField("break_seconds", QVariant.Int),
         ]
     )
     layer.updateFields()
@@ -134,6 +154,10 @@ def vehicles_layer(vehicles: List[Waypoint], with_amounts: bool) -> QgsVectorLay
                 _text(wp.attrs.get("end")),
                 _text(wp.attrs.get("skills")),
                 None if mode == VRP_MODES[0] else mode,
+                _positive(wp.attrs.get("max_jobs")),
+                _text(wp.attrs.get("break_start")),
+                _text(wp.attrs.get("break_end")),
+                _positive(wp.attrs.get("break_minutes"), 60),  # minutes in the table
             ]
         )
         feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(wp.lon, wp.lat)))
@@ -177,6 +201,7 @@ class VrpRun:
         exploration_level: int,
         timeout: int,
         on_done: Callable[[List[QgsMapLayer], Optional[str]], None],
+        keep_order: bool = False,
     ):
         self.on_done = on_done
         self.warnings: List[str] = list()
@@ -210,10 +235,26 @@ class VrpRun:
             alg_cls.IN_VEH_TW_END: "shift_end",
             alg_cls.IN_VEH_SKILLS: "skills",
             alg_cls.IN_VEH_PROFILE: "mode",
+            alg_cls.IN_JOB_PRIORITY: "priority",
+            alg_cls.IN_JOB_VEHICLE: "vehicle",
+            alg_cls.IN_JOB_SEQUENCE: "sequence",
+            alg_cls.IN_JOB_SHIPMENT: "shipment",
+            alg_cls.IN_JOB_ROLE: "shipment_role",
+            alg_cls.IN_VEH_MAX_TASKS: "max_jobs",
+            alg_cls.IN_KEEP_ORDER: keep_order,
             alg_cls.IN_RETURN: return_to_start,
             alg_cls.IN_EXPLORATION: exploration_level,
             alg_cls.IN_TIMEOUT: timeout,
         }
+        # breaks only if a vehicle has one: keeping the order warns about any break field
+        if any(_positive(wp.attrs.get("break_minutes"), 60) for wp in vehicles):
+            self.params.update(
+                {
+                    alg_cls.IN_VEH_BREAK_START: "break_start",
+                    alg_cls.IN_VEH_BREAK_END: "break_end",
+                    alg_cls.IN_VEH_BREAK_DURATION: "break_seconds",
+                }
+            )
         for out in (alg_cls.OUT, alg_cls.OUT_STOPS, alg_cls.OUT_UNASSIGNED):
             self.params[out] = QgsProcessingOutputLayerDefinition(QgsProcessing.TEMPORARY_OUTPUT)
 

@@ -251,6 +251,8 @@ class WaypointsWidget(QWidget):
         self._add_attrs: Dict[str, Any] = dict()
         # don't write back to the project while restoring from it
         self._restoring = False
+        # whether the columns marked advanced are shown (for every kind)
+        self.show_advanced = False
 
         self.setupUi()
 
@@ -305,8 +307,29 @@ class WaypointsWidget(QWidget):
         self.table_model = self.table_models[kind.name]
         self.ui_table.setModel(self.table_model)
         self._open_persistent_editors()
+        self._apply_column_visibility()
         self._setup_kind_buttons()
         self._set_layer_visible(kind, True)
+
+    def set_show_advanced(self, show: bool):
+        """Shows or hides the columns marked advanced (e.g. the VRP's shipments and breaks)."""
+        self.show_advanced = show
+        self._apply_column_visibility()
+
+    def _apply_column_visibility(self):
+        """
+        Hides the advanced columns unless they're shown. With them shown the columns get their
+        content's width and the table scrolls sideways, else they share the width.
+        """
+        columns = self.table_model.table_kind.columns
+        for col_id, col in enumerate(columns):
+            self.ui_table.setColumnHidden(col_id, col.advanced and not self.show_advanced)
+        header = self.ui_table.horizontalHeader()
+        if self.show_advanced and any(c.advanced for c in columns):
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            self.ui_table.resizeColumnsToContents()
+        else:
+            header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
     @property
     def waypoints(self) -> List[Waypoint]:

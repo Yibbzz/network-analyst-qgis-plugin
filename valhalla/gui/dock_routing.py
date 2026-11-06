@@ -554,6 +554,23 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
         self.ui_vrp_timeout.setSpecialValueText("none")
         self.ui_vrp_timeout.setToolTip("Stop the solver after this long and keep its best routes")
         form.addRow("Time limit", self.ui_vrp_timeout)
+        self.ui_vrp_keep_order = QCheckBox("Keep the order")
+        self.ui_vrp_keep_order.setToolTip(
+            "Don't optimize: keep every job on its Vehicle in its Order (advanced columns) and "
+            "only compute the times; what the plan breaks is in the 'violations' fields"
+        )
+        form.addRow(self.ui_vrp_keep_order)
+        self.ui_vrp_advanced = QCheckBox("Show advanced columns")
+        self.ui_vrp_advanced.setToolTip(
+            "Priority, assigned vehicle, order, shipments, max jobs and breaks in the table"
+        )
+        # resolved on toggle: the waypoints widget is built after this page
+        self.ui_vrp_advanced.toggled.connect(lambda on: self.waypoints_widget.set_show_advanced(on))
+        # keeping the order needs the Vehicle and Order columns
+        self.ui_vrp_keep_order.toggled.connect(
+            lambda on: on and self.ui_vrp_advanced.setChecked(True)
+        )
+        form.addRow(self.ui_vrp_advanced)
         self.ui_params_stacked.addWidget(page)
         self.ui_vrp_params = page
 
@@ -582,6 +599,7 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
             return_to_start=self.ui_vrp_return.isChecked(),
             exploration_level=self.ui_vrp_exploration.value(),
             timeout=self.ui_vrp_timeout.value(),
+            keep_order=self.ui_vrp_keep_order.isChecked(),
             on_done=self._on_vrp_done,
         )
         self.vrp_run.start()

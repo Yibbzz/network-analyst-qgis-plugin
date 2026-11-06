@@ -72,14 +72,37 @@ class TestVrpRun(LocalhostDockerTestCase):
 
         # no job has an amount: capacities are left out, even a vehicle's
         job = next(jobs_layer(jobs, with_amounts=False).getFeatures())
-        self.assertEqual(job.attributes(), ["job 0", None, 90, None, None, None])  # minutes -> seconds
+        # minutes -> seconds; the advanced columns' 0/empty = not set
+        self.assertEqual(job.attributes(), ["job 0", None, 90] + [None] * 8)
         van = next(vehicles_layer(vehicles, with_amounts=False).getFeatures())
-        self.assertEqual(van.attributes(), ["van", None, None, None, None, None])  # "default" mode
+        self.assertEqual(van.attributes(), ["van"] + [None] * 9)  # "default" mode
 
         # unnamed vehicles get a name, a capacity of 0 counts as none
         unnamed = split_waypoints(table({"amount": 0, "mode": "truck"}))[1]
         vehicle = next(vehicles_layer(unnamed, with_amounts=True).getFeatures())
-        self.assertEqual(vehicle.attributes(), ["vehicle 1", None, None, None, None, "truck"])
+        expected = ["vehicle 1", None, None, None, None, "truck"] + [None] * 4
+        self.assertEqual(vehicle.attributes(), expected)
+
+        # the advanced columns
+        advanced = table(
+            {
+                "name": "van",
+                "max_jobs": 3,
+                "break_start": "12:00",
+                "break_end": "13:00",
+                "break_minutes": 0.5,
+            },
+            priority=10,
+            vehicle="van",
+            order=2,
+            shipment="s1",
+            shipment_role="pickup",
+        )
+        jobs, vehicles = split_waypoints(advanced)
+        job = next(jobs_layer(jobs, with_amounts=False).getFeatures())
+        self.assertEqual(job.attributes()[-5:], [10, "van", 2, "s1", "pickup"])
+        van = next(vehicles_layer(vehicles, with_amounts=False).getFeatures())
+        self.assertEqual(van.attributes()[-4:], [3, "12:00", "13:00", 30])  # minutes -> seconds
 
     def test_solve(self):
         waypoints = table(
@@ -102,6 +125,59 @@ class TestVrpRun(LocalhostDockerTestCase):
         for layer in (routes, stops):
             self.assertIsInstance(layer.renderer(), QgsCategorizedSymbolRenderer)
         self.assertEqual(run.warnings, [])
+
+    @staticmethod
+    def jobs_by_vehicle(stops) -> dict:
+        jobs = dict()
+        for s in sorted(stops.getFeatures(), key=lambda s: (s["vehicle_id"], s["sequence"])):
+            if s["type"] in ("job", "pickup", "delivery"):
+                jobs.setdefault(s["vehicle_id"], []).append((s["name"], s["type"]))
+        return jobs
+
+    def test_advanced(self):
+        """Locks, shipments, max jobs and breaks from the advanced columns."""
+        waypoints = table(
+            {"name": "van1", "start": "08:00"},
+            {
+                "name": "van2",
+                "start": "08:00",
+                "max_jobs": 4,
+                "break_start": "09:00",
+                "break_end": "17:00",
+                "break_minutes": 30,
+            },
+        )
+        attrs = {wp.attrs["name"]: wp.attrs for wp in waypoints}
+        attrs["job 0"]["vehicle"] = "van2"
+        attrs["job 6"].update(shipment="s1", shipment_role="pickup")  # Soldeu
+        attrs["job 2"].update(shipment="s1", shipment_role="delivery")  # Sant Julià
+        (unassigned, routes, stops), error, _ = self.run_vrp(waypoints)
+        self.assertIsNone(error)
+
+        by_vehicle = self.jobs_by_vehicle(stops)
+        self.assertIn(("job 0", "job"), by_vehicle["van2"])
+        self.assertLessEqual(len(by_vehicle.get("van2", [])), 4)
+        shipment = ("job 6", "job 2")
+        carriers = {vid for vid, steps in by_vehicle.items() for job, _ in steps if job in shipment}
+        self.assertEqual(len(carriers), 1)  # one vehicle
+        steps = by_vehicle[carriers.pop()]
+        self.assertLess(steps.index(("job 6", "pickup")), steps.index(("job 2", "delivery")))
+        breaks = [s for s in stops.getFeatures() if s["type"] == "break"]
+        self.assertEqual([(b["vehicle_id"], b["service"]) for b in breaks], [("van2", 1800)])
+
+    def test_keep_order(self):
+        """The table's vehicle & order are kept; vehicles without jobs get no route."""
+        waypoints = table({"name": "van"}, {"name": "bike", "mode": "bicycle"})
+        for order, i in enumerate((6, 2, 0), 1):  # Soldeu, Sant Julià, Escaldes: a zig-zag
+            waypoints[i].attrs.update(vehicle="van", order=order)
+        (unassigned, routes, stops), error, run = self.run_vrp(waypoints, keep_order=True)
+        self.assertIsNone(error)
+        self.assertEqual(
+            self.jobs_by_vehicle(stops), {"van": [("job 6", "job"), ("job 2", "job"), ("job 0", "job")]}
+        )
+        self.assertEqual([r["name"] for r in routes.getFeatures()], ["van"])
+        self.assertEqual({u["reason"] for u in unassigned.getFeatures()}, {"no vehicle or sequence"})
+        self.assertEqual(unassigned.featureCount(), len(JOBS) - 3)
 
     def test_error(self):
         layers, error, _ = self.run_vrp(table({"name": "van"}, {"name": "van"}))
@@ -132,4 +208,17 @@ class TestVrpDock(LocalhostDockerTestCase):
         # without points it asks for them instead of running
         dlg._on_execute()
         self.assertIsNone(dlg.vrp_run)
+
+        # the advanced columns are hidden until asked for; keeping the order shows them
+        table_view, columns = dlg.waypoints_widget.ui_table, VRP.columns
+        advanced = [i for i, c in enumerate(columns) if c.advanced]
+        self.assertTrue(advanced)
+        self.assertTrue(all(table_view.isColumnHidden(i) for i in advanced))
+        basic = [i for i, c in enumerate(columns) if not c.advanced]
+        self.assertFalse(any(table_view.isColumnHidden(i) for i in basic))
+        dlg.ui_vrp_keep_order.setChecked(True)
+        self.assertTrue(dlg.ui_vrp_advanced.isChecked())
+        self.assertFalse(any(table_view.isColumnHidden(i) for i in advanced))
+        dlg.ui_vrp_advanced.setChecked(False)
+        self.assertTrue(all(table_view.isColumnHidden(i) for i in advanced))
         dlg.unload()
