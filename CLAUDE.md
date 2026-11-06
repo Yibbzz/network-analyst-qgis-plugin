@@ -80,6 +80,12 @@ scripts/
 
 ## UI files
 
+- **A number box without a `value` property starts at its `minimum`**, and the costing panels send
+  every box's value to Valhalla. That's how car/truck/motorbike(/bus, it reuses the car panel)
+  `service_factor` was 0.1 instead of Valhalla's 1.0 (service roads 10× cheaper; Valhalla only
+  applies it together with the also-sent `service_penalty`), and truck `axle_load` 0 (= no axle
+  limits) instead of 9.07. Give every new box an explicit Valhalla-default `value`.
+
 `.ui` files (Qt Designer XML) live under `valhalla/resources/ui/` and are **loaded at runtime**
 (`uic.loadUiType(str(UI_RESOURCE_PATH / "x.ui"))` at module top, since #67). There is no
 `gui/compiled/` anymore; `scripts/compile_ui.sh` is a dead leftover.
