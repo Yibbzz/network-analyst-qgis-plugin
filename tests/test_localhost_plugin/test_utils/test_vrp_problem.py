@@ -169,6 +169,48 @@ class TestProblem(unittest.TestCase):
         # only the fleet's profiles
         self.assertEqual(list(problem["matrices"]), ["auto"])
 
+    def test_end_costs_limits(self):
+        vehicle = vrp.Vehicle(
+            "v1",
+            0,
+            "auto",
+            end_location=2,
+            fixed_cost=500,
+            cost_per_km=30,
+            max_travel_time=900,
+            max_distance=12_000,
+        )
+        for return_to_start in (True, False):  # an end point wins either way
+            problem, keep, _ = vrp.build_vroom_problem(
+                make_problem([vehicle]), return_to_start, MATRICES
+            )
+            out = problem["vehicles"][0]
+            self.assertEqual(keep, [0, 1, 2])
+            self.assertEqual((out["start_index"], out["end_index"]), (0, 2))
+            # only the costs that are set; VROOM's defaults for the rest
+            self.assertEqual(out["costs"], {"fixed": 500, "per_km": 30})
+            self.assertEqual((out["max_travel_time"], out["max_distance"]), (900, 12_000))
+        plain, _, _ = vrp.build_vroom_problem(make_problem(), True, MATRICES)
+        self.assertFalse({"costs", "max_travel_time", "max_distance"} & set(plain["vehicles"][0]))
+
+    def test_end_location_kept_and_reached(self):
+        """An end point outside the jobs' locations is kept; unreachable counts the way there."""
+        problem = make_problem([vrp.Vehicle("t", 0, "truck", end_location=2)], [vrp.Job(1)])
+        built, keep, _ = vrp.build_vroom_problem(problem, False, MATRICES)
+        self.assertEqual(keep, [0, 1, 2])
+        self.assertEqual(built["vehicles"][0]["end_index"], 2)
+        # depot -> a -> end at b works for the truck (it only can't leave b)
+        self.assertEqual(vrp.unreachable_jobs(problem, MATRICES, False), [])
+        # ending at the depot, a job at b is a dead end: unreachable, even without returning
+        stuck = make_problem([vrp.Vehicle("t", 0, "truck", end_location=0)], [vrp.Job(2)])
+        self.assertEqual(vrp.unreachable_jobs(stuck, MATRICES, False), [0])
+
+    def test_non_negative(self):
+        self.assertEqual(vrp.to_non_negative("12.6", "cost"), 13)
+        self.assertIsNone(vrp.to_non_negative(None, "cost"))
+        with self.assertRaisesRegex(ValueError, "negative"):
+            vrp.to_non_negative(-1, "cost")
+
     def test_mixed_fleet_matrices(self):
         fleet = [vrp.Vehicle("t", 0, "truck"), vrp.Vehicle("c", 0, "auto")]
         problem, _, _ = vrp.build_vroom_problem(make_problem(fleet), False, MATRICES)

@@ -100,6 +100,9 @@ Two flavors, intentionally exclusive (one or the other, never both):
 
 ```shell
 # Docker-backed: needs `docker run -p 8002:8002 ghcr.io/valhalla/valhalla-scripted:latest`
+# AND the VRP test network on 8003 (see "Vehicle routing" below):
+#   docker run -dt --name valhalla-corridor -p 8003:8002 -v $PWD/tests/data/vrp_corridor:/custom_files \
+#     -e build_admins=False -e build_time_zones=False ghcr.io/valhalla/valhalla-scripted:latest
 # pyvalhalla MUST be uninstalled (rm -r ~/.local/share/QGIS/QGIS4/profiles/default/valhalla/pyvalhalla)
 QT_QPA_PLATFORM=offscreen python -m coverage run --append -m unittest discover -s tests/test_localhost_docker -t .
 
@@ -416,6 +419,16 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   The algorithm's costing options only apply to its own profile (`_profile_params`).
 - **Shipments**: two jobs sharing a shipment ID with roles pickup/delivery become one VROOM
   shipment; pickup id k and delivery id k' are their job positions, like plain jobs.
+- **End points, costs, driving limits** (`Vehicle.end_location` / `fixed_cost`, `cost_per_hour`,
+  `cost_per_km` / `max_travel_time` (s), `max_distance` (m); all advanced): ends are an optional
+  point layer with a vehicle-ID field; an end wins over "return to start" (`Vehicle.end()`).
+  Costs go to VROOM's `costs` only when set (VROOM defaults 0/3600/0 = cost is travel seconds);
+  the routes output gets VROOM's `cost`. **VROOM's output has no route distance** (pyvroom's
+  `to_json`), so anything needing a trip's distance sums the matrix along the steps.
+  Waste: home = the end point; the limits are a budget over all trips (each round gets what's
+  left minus the drive home); budgets must be ints (VROOM rejects 1.5 m).
+  Dock: a third row type `end` (Name = the vehicle's name) + advanced vehicle columns Fixed
+  cost, Cost/h (default 3600), Cost/km, Max drive (min), Max km.
 - **Assigned vehicle (locks)**: VROOM can't pin a job to a vehicle, so every vehicle gets its own
   skill `LOCK_SKILL_BASE + i` and a locked job requires it. IDs compare as text.
 - **Keep the order (plan mode)**: vehicles get VROOM `steps` from the sequence field and the runner
@@ -427,6 +440,19 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   stop and the route), not as lateness on a job.
 - Tests: `test_vrp_problem.py` (no valhalla), `test_vroom.py` (the runner), and the algorithm
   against Andorra in `tests/test_localhost_docker/test_processing/test_vehicle_routing/`.
+- **The made-up test network** (`tests/data/vrp_corridor/`, `test_vrp_corridor.py`): a 20 km
+  main road + 5 km side road on the equator at 10°E, built with
+  [NetworkForge](https://github.com/Yibbzz/networkforge) (`make_corridor.py` regenerates the
+  PBF byte-identically). Exact travel times (70.588 / 225 s/km; Valhalla drives 85% of
+  maxspeed) let tests assert limits/costs at their thresholds. Gotchas hit building it:
+  - **Its own Valhalla on port 8003** (CI: second `docker run` in all three workflows). Built
+    together with Andorra in one `valhalla_build_tiles`, the second extract's ways were silently
+    ignored (4681 ways either way, whatever the file order or ID range).
+  - valhalla-scripted's `use_tiles_ignore_pbf=True` (default) skips new PBFs once tiles exist:
+    locally, recreate the container or set it False. CI always starts clean.
+  - Valhalla's **matrix has whole seconds** (truncated): VROOM thresholds come from those, not
+    from km × s/km. The algorithms are pointed at 8003 by overriding `get_base_params` (like the
+    dock's `DockVrp`), with Valhalla's default costing options.
 - **Waste collection** (`vehicle_routing/waste.py`, `valhalla:valhalla_waste_<profile>`): the VRP
   algorithm minus shipments/locks/plan mode, plus landfills, an unload time and max trips; the
   pickup amount is the waste. VROOM has no reloads, so `multi_trip.solve_multi_trip` solves in

@@ -39,14 +39,19 @@ jobs:
 
           # first run the docker/external valhalla_service tests
           docker run -dt --name valhalla-router -p 8002:8002 -v $PWD/tests/data:/custom_files -e tileset_name=andorra-tiles ghcr.io/valhalla/valhalla-scripted:latest
+          # the made-up VRP test network (tests/data/vrp_corridor) on its own server: built
+          # together with Andorra, valhalla_build_tiles ignored it
+          docker run -dt --name valhalla-corridor -p 8003:8002 -v $PWD/tests/data/vrp_corridor:/custom_files -e build_admins=False -e build_time_zones=False ghcr.io/valhalla/valhalla-scripted:latest
           sudo apt-get update && sudo apt-get install -y moreutils
           jq '.service_limits.status.allow_verbose = true' $PWD/tests/data/valhalla.json | sponge $PWD/tests/data/valhalla.json
           docker restart valhalla-router
+          timeout 300 bash -c 'until curl -sf localhost:8003/status > /dev/null; do sleep 3; done'
           docker exec qgis-testing-environment bash -c "/tests_directory/tests/scripts/qgis_test_setup.sh ${{ matrix.qgis_tags }} ${{ env.PLUGIN_PATH }} tests/test_localhost_docker"
 
           # then with the plugin enabled and no external valhalla_service
           # the test setup will install the bindings to the right location
           docker stop valhalla-router
+          docker stop valhalla-corridor
           docker exec qgis-testing-environment bash -c "/tests_directory/tests/scripts/qgis_test_setup.sh ${{ matrix.qgis_tags }} ${{ env.PLUGIN_PATH }} tests/test_localhost_plugin"
           # do the coverage
           docker exec qgis-testing-environment bash -c "cd /tests_directory && python3 -m coverage report && python3 -m coverage lcov --include \"valhalla/*\""

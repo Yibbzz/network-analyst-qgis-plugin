@@ -64,7 +64,7 @@ from . import UI_RESOURCE_PATH
 from .dlg_about import AboutDialog
 from .gui_utils import add_msg_bar
 from .spopt_run import SpoptRun, matrix_layer, split_waypoints
-from .vrp_run import FleetProblem, VrpRun
+from .vrp_run import FleetProblem, VrpRun, end_points
 from .vrp_run import split_waypoints as split_vrp_waypoints
 from .widgets.waypoint_model import ROUTING, SPOPT, VRP, Waypoint, WaypointTableKind
 from .widgets.widget_router import PROFILE_TO_UI, RouterWidget
@@ -562,14 +562,13 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
         form.addRow(self.ui_vrp_keep_order)
         self.ui_vrp_advanced = QCheckBox("Show advanced columns")
         self.ui_vrp_advanced.setToolTip(
-            "Priority, assigned vehicle, order, shipments, max jobs and breaks in the table"
+            "Priority, assigned vehicle, order, shipments, max jobs, breaks, costs and driving "
+            "limits in the table"
         )
         # resolved on toggle: the waypoints widget is built after this page
         self.ui_vrp_advanced.toggled.connect(lambda on: self.waypoints_widget.set_show_advanced(on))
         # keeping the order needs the Vehicle and Order columns
-        self.ui_vrp_keep_order.toggled.connect(
-            lambda on: on and self.ui_vrp_advanced.setChecked(True)
-        )
+        self.ui_vrp_keep_order.toggled.connect(lambda on: on and self.ui_vrp_advanced.setChecked(True))
         form.addRow(self.ui_vrp_advanced)
         self.ui_params_stacked.addWidget(page)
         self.ui_vrp_params = page
@@ -585,7 +584,8 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
             )
             return
 
-        jobs, vehicles = split_vrp_waypoints(self.waypoints_widget.table_models[VRP.name].waypoints)
+        table = self.waypoints_widget.table_models[VRP.name].waypoints
+        jobs, vehicles = split_vrp_waypoints(table)
         if not jobs or not vehicles:
             self.status_bar.pushWarning("Missing points", "Add at least one job and one vehicle")
             return
@@ -600,6 +600,7 @@ class RoutingDockWidget(QgsDockWidget, GENERATED_FORM_CLASS):
             exploration_level=self.ui_vrp_exploration.value(),
             timeout=self.ui_vrp_timeout.value(),
             keep_order=self.ui_vrp_keep_order.isChecked(),
+            ends=end_points(table),
             on_done=self._on_vrp_done,
         )
         self.vrp_run.start()

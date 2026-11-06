@@ -210,10 +210,11 @@ SPOPT = WaypointTableKind(
 class VrpRole(str, Enum):
     JOB = "job"
     VEHICLE = "vehicle"
+    END = "end"  # where the vehicle with this row's name finishes, if not where it started
 
 
-def _is_vrp_role(role: VrpRole) -> Callable[[Dict[str, Any]], bool]:
-    return lambda attrs: attrs.get("role") == role.value
+def _is_vrp_role(*roles: VrpRole) -> Callable[[Dict[str, Any]], bool]:
+    return lambda attrs: attrs.get("role") in {r.value for r in roles}
 
 
 # "default" = the travel mode selected in the dock
@@ -227,10 +228,17 @@ VRP = WaypointTableKind(
             "Type",
             ColumnKind.CHOICE,
             VrpRole.JOB.value,
-            "A job to serve, or a vehicle starting (and ending) here",
+            "A job to serve, a vehicle starting (and ending) here, or the end of the vehicle "
+            "named in Name, if it finishes somewhere else",
             tuple(r.value for r in VrpRole),
         ),
-        Column("name", "Name", ColumnKind.TEXT, "", "Carried over to the results, names the vehicles"),
+        Column(
+            "name",
+            "Name",
+            ColumnKind.TEXT,
+            "",
+            "Carried over to the results, names the vehicles; an end's vehicle",
+        ),
         Column(
             "amount",
             "Amount",
@@ -238,6 +246,7 @@ VRP = WaypointTableKind(
             0,
             "A job's delivery amount, a vehicle's capacity; leave all 0 to ignore capacities",
             maximum=1e9,
+            applies=_is_vrp_role(VrpRole.JOB, VrpRole.VEHICLE),
         ),
         Column(
             "service",
@@ -254,6 +263,7 @@ VRP = WaypointTableKind(
             ColumnKind.TEXT,
             "",
             f"A job's earliest arrival, a vehicle's shift start, {_TIME_TIP}",
+            applies=_is_vrp_role(VrpRole.JOB, VrpRole.VEHICLE),
         ),
         Column(
             "end",
@@ -261,6 +271,7 @@ VRP = WaypointTableKind(
             ColumnKind.TEXT,
             "",
             f"A job's latest arrival, a vehicle's shift end, {_TIME_TIP}",
+            applies=_is_vrp_role(VrpRole.JOB, VrpRole.VEHICLE),
         ),
         Column(
             "skills",
@@ -268,6 +279,7 @@ VRP = WaypointTableKind(
             ColumnKind.TEXT,
             "",
             "Comma separated integers: a job's required skills, a vehicle's skills",
+            applies=_is_vrp_role(VrpRole.JOB, VrpRole.VEHICLE),
         ),
         Column(
             "mode",
@@ -366,14 +378,67 @@ VRP = WaypointTableKind(
             applies=_is_vrp_role(VrpRole.VEHICLE),
             advanced=True,
         ),
+        Column(
+            "fixed_cost",
+            "Fixed cost",
+            ColumnKind.INT,
+            0,
+            "What using the vehicle at all costs, e.g. to use fewer vehicles. Costs add up to what "
+            "the solver keeps lowest; with the defaults that's the travel time in seconds",
+            maximum=1e9,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "cost_per_hour",
+            "Cost/h",
+            ColumnKind.INT,
+            3600,
+            "Cost per hour of travel; the default 3600 makes the cost the travel time in seconds",
+            maximum=1e9,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "cost_per_km",
+            "Cost/km",
+            ColumnKind.INT,
+            0,
+            "Cost per km driven, e.g. fuel",
+            maximum=1e9,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "max_minutes",
+            "Max drive",
+            ColumnKind.FLOAT,
+            0.0,
+            "The most minutes the vehicle may drive (service and waiting not counted), 0 = no limit",
+            maximum=1e6,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
+        Column(
+            "max_km",
+            "Max km",
+            ColumnKind.FLOAT,
+            0.0,
+            "The most km the vehicle may drive, 0 = no limit",
+            maximum=1e6,
+            applies=_is_vrp_role(VrpRole.VEHICLE),
+            advanced=True,
+        ),
     ),
     ann_layer_name=f"{PLUGIN_NAME} Jobs & Vehicles",
-    marker=lambda _, __, wp: (
-        "vehicle.svg" if wp.attrs.get("role") == VrpRole.VEHICLE.value else "demand.svg"
-    ),
+    marker=lambda _, __, wp: {
+        VrpRole.VEHICLE.value: "vehicle.svg",
+        VrpRole.END.value: "destination.svg",
+    }.get(wp.attrs.get("role"), "demand.svg"),
     add_modes=(
         AddMode("job", "jobs", {"role": VrpRole.JOB.value}),
         AddMode("vehicle", "vehicles", {"role": VrpRole.VEHICLE.value}),
+        AddMode("vehicle end", "vehicle ends", {"role": VrpRole.END.value}),
     ),
     layer_fields=(
         LayerField("name", "Name"),
@@ -391,6 +456,11 @@ VRP = WaypointTableKind(
         LayerField("break_start", "Break from (HH:MM)"),
         LayerField("break_end", "Break to (HH:MM)"),
         LayerField("break_minutes", "Break minutes", numeric=True),
+        LayerField("fixed_cost", "Fixed cost (vehicles)", numeric=True),
+        LayerField("cost_per_hour", "Cost per hour (vehicles)", numeric=True),
+        LayerField("cost_per_km", "Cost per km (vehicles)", numeric=True),
+        LayerField("max_minutes", "Max drive minutes (vehicles)", numeric=True),
+        LayerField("max_km", "Max km (vehicles)", numeric=True),
     ),
 )
 

@@ -6,12 +6,13 @@ from qgis.PyQt.QtCore import QEventLoop, QTimer
 from valhalla.core import pypi
 from valhalla.global_definitions import RouterProfile
 from valhalla.gui.dock_routing import RoutingDockWidget
-from valhalla.gui.vrp_run import VrpRun, jobs_layer, split_waypoints, vehicles_layer
+from valhalla.gui.vrp_run import VrpRun, end_points, jobs_layer, split_waypoints, vehicles_layer
 from valhalla.gui.widgets.waypoint_model import VRP, Waypoint
 
 from ... import URL, LocalhostDockerTestCase, clear_project_points
 from ...utilities import get_qgis_app
 from ..test_processing.test_vehicle_routing.test_vrp import DEPOT, JOBS
+from ..test_processing.test_vehicle_routing.test_vrp_corridor import URL_CORRIDOR, m
 
 QGIS_APP, CANVAS, IFACE, PARENT = get_qgis_app()
 
@@ -75,12 +76,13 @@ class TestVrpRun(LocalhostDockerTestCase):
         # minutes -> seconds; the advanced columns' 0/empty = not set
         self.assertEqual(job.attributes(), ["job 0", None, 90] + [None] * 8)
         van = next(vehicles_layer(vehicles, with_amounts=False).getFeatures())
-        self.assertEqual(van.attributes(), ["van"] + [None] * 9)  # "default" mode
+        # "default" mode; the costs are VROOM's defaults: no fixed cost, the cost is travel time
+        self.assertEqual(van.attributes(), ["van"] + [None] * 9 + [0, 3600, 0, None, None])
 
         # unnamed vehicles get a name, a capacity of 0 counts as none
         unnamed = split_waypoints(table({"amount": 0, "mode": "truck"}))[1]
         vehicle = next(vehicles_layer(unnamed, with_amounts=True).getFeatures())
-        expected = ["vehicle 1", None, None, None, None, "truck"] + [None] * 4
+        expected = ["vehicle 1", None, None, None, None, "truck"] + [None] * 4 + [0, 3600, 0, None, None]
         self.assertEqual(vehicle.attributes(), expected)
 
         # the advanced columns
@@ -91,6 +93,11 @@ class TestVrpRun(LocalhostDockerTestCase):
                 "break_start": "12:00",
                 "break_end": "13:00",
                 "break_minutes": 0.5,
+                "fixed_cost": 50,
+                "cost_per_hour": 0,
+                "cost_per_km": 12,
+                "max_minutes": 90,
+                "max_km": 40.5,
             },
             priority=10,
             vehicle="van",
@@ -102,7 +109,8 @@ class TestVrpRun(LocalhostDockerTestCase):
         job = next(jobs_layer(jobs, with_amounts=False).getFeatures())
         self.assertEqual(job.attributes()[-5:], [10, "van", 2, "s1", "pickup"])
         van = next(vehicles_layer(vehicles, with_amounts=False).getFeatures())
-        self.assertEqual(van.attributes()[-4:], [3, "12:00", "13:00", 30])  # minutes -> seconds
+        # minutes -> seconds, km -> meters; a cost per hour of 0 is kept (only km cost)
+        self.assertEqual(van.attributes()[-9:], [3, "12:00", "13:00", 30, 50, 0, 12, 5400, 40_500])
 
     def test_solve(self):
         waypoints = table(
@@ -178,6 +186,42 @@ class TestVrpRun(LocalhostDockerTestCase):
         self.assertEqual([r["name"] for r in routes.getFeatures()], ["van"])
         self.assertEqual({u["reason"] for u in unassigned.getFeatures()}, {"no vehicle or sequence"})
         self.assertEqual(unassigned.featureCount(), len(JOBS) - 3)
+
+    def test_ends_costs_limits(self):
+        """On the made-up corridor (see test_vrp_corridor): an end row, costs and a drive limit."""
+
+        def solve(**b_attrs):
+            table = [
+                Waypoint(*m(15), {"role": "job", "name": "j"}),
+                Waypoint(*m(0), {"role": "vehicle", "name": "a"}),
+                Waypoint(*m(20), {"role": "end", "name": "a"}),
+                Waypoint(*m(10), {"role": "vehicle", "name": "b", **b_attrs}),
+            ]
+            (unassigned, routes, stops), error, _ = self.run_vrp(
+                table, provider_url=URL_CORRIDOR, ends=end_points(table)
+            )
+            self.assertIsNone(error)
+            return {r["name"]: r for r in routes.getFeatures()}, stops
+
+        # a passes the job on its way to its end at km 20 (1412 s), b goes there and back from
+        # km 10 (706 s): b
+        routes, _ = solve()
+        self.assertEqual(list(routes), ["b"])
+        # b costs 100000 to use -> a, which ends at km 20
+        routes, stops = solve(fixed_cost=100_000)
+        self.assertEqual(list(routes), ["a"])
+        end = [s for s in stops.getFeatures() if s["type"] == "end"][0]
+        self.assertAlmostEqual(end.geometry().asPoint().x(), m(20)[0], places=6)
+        self.assertAlmostEqual(routes["a"]["cost"], routes["a"]["duration"], delta=1)
+        # b may drive 12 minutes, out to the job and back is 2 x 353 s: still b
+        routes, _ = solve(fixed_cost=0, max_minutes=12)
+        self.assertEqual(list(routes), ["b"])
+        # ... but 10 km out and back don't fit into 9.9 km
+        routes, _ = solve(max_km=9.9)
+        self.assertEqual(list(routes), ["a"])
+        # cost per km and per hour reach the solver: b's km cost 1000 -> a
+        routes, _ = solve(cost_per_km=1000)
+        self.assertEqual(list(routes), ["a"])
 
     def test_error(self):
         layers, error, _ = self.run_vrp(table({"name": "van"}, {"name": "van"}))

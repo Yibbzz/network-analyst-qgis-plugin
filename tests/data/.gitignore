@@ -4,3 +4,8 @@
 !.gitignore
 !andorra-latest.osm.pbf
 !*.geojson
+# the VRP test network: its source and map, not the tiles its Valhalla writes next to them
+!vrp_corridor/
+vrp_corridor/*
+!vrp_corridor/make_corridor.py
+!vrp_corridor/vrp_corridor.osm.pbf

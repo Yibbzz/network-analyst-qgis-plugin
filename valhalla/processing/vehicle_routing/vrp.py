@@ -59,6 +59,7 @@ from .problem import (
     time_window,
     to_amount,
     to_int,
+    to_non_negative,
     to_profile,
     to_role,
     to_seconds,
@@ -85,6 +86,7 @@ class FieldNames:
     STOPS = "stops"
     DURATION = "duration"
     DISTANCE = "distance"
+    COST = "cost"
     START = "start"
     END = "end"
     DELIVERY = "delivery"
@@ -144,6 +146,13 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
     IN_VEH_BREAK_START = "INPUT_VEHICLE_BREAK_START"
     IN_VEH_BREAK_END = "INPUT_VEHICLE_BREAK_END"
     IN_VEH_BREAK_DURATION = "INPUT_VEHICLE_BREAK_DURATION"
+    IN_VEH_FIXED_COST = "INPUT_VEHICLE_FIXED_COST"
+    IN_VEH_COST_PER_HOUR = "INPUT_VEHICLE_COST_PER_HOUR"
+    IN_VEH_COST_PER_KM = "INPUT_VEHICLE_COST_PER_KM"
+    IN_VEH_MAX_TRAVEL_TIME = "INPUT_VEHICLE_MAX_TRAVEL_TIME"
+    IN_VEH_MAX_DISTANCE = "INPUT_VEHICLE_MAX_DISTANCE"
+    IN_VEH_ENDS = "INPUT_VEHICLE_ENDS"
+    IN_VEH_END_ID = "INPUT_VEHICLE_END_ID"
     IN_RETURN = "INPUT_RETURN_TO_START"
     IN_KEEP_ORDER = "INPUT_KEEP_ORDER"
 
@@ -234,6 +243,39 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             (self.IN_VEH_BREAK_DURATION, "Vehicle break duration field (seconds)", "numeric"),
         ):
             self._add_field_param(name, desc, self.IN_VEH, field_type, False)
+        for name, desc in (
+            (
+                self.IN_VEH_FIXED_COST,
+                "Vehicle fixed cost field: what using the vehicle at all costs (e.g. to use fewer)",
+            ),
+            (
+                self.IN_VEH_COST_PER_HOUR,
+                "Vehicle cost per hour of travel field (default 3600: the cost is the travel time)",
+            ),
+            (self.IN_VEH_COST_PER_KM, "Vehicle cost per km field (default 0)"),
+            (
+                self.IN_VEH_MAX_TRAVEL_TIME,
+                "Vehicle maximum travel time field (seconds, service and waiting not counted)",
+            ),
+            (self.IN_VEH_MAX_DISTANCE, "Vehicle maximum distance field (meters)"),
+        ):
+            self._add_field_param(name, desc, self.IN_VEH, "numeric", True)
+
+        ends = QgsProcessingParameterFeatureSource(
+            name=self.IN_VEH_ENDS,
+            description="Vehicle end points: where vehicles finish, if not where they started",
+            types=[QgsProcessing.SourceType.TypeVectorPoint],
+            optional=True,
+        )
+        ends.setFlags(ends.flags() | QgsProcessingParameterDefinition.Flag.FlagAdvanced)
+        self.addParameter(ends)
+        self._add_field_param(
+            self.IN_VEH_END_ID,
+            "Vehicle ID field of the end points (the vehicle each one is for)",
+            self.IN_VEH_ENDS,
+            "any",
+            True,
+        )
 
         self.addParameter(
             QgsProcessingParameterBoolean(
@@ -411,6 +453,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                     distance,
                     route.get("service"),
                     route.get("waiting_time"),
+                    route.get("cost"),
                     steps[0].get("arrival") if steps else None,
                     steps[-1].get("arrival") if steps else None,
                     ",".join(map(str, route.get("delivery", []))) or None,
@@ -558,6 +601,15 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             """An ID attribute, None for NULL or empty text."""
             return None if is_null(value) or str(value).strip() == "" else value
 
+        def cost(value):
+            return to_non_negative(value, "cost")
+
+        def duration(value):
+            return to_non_negative(value, "duration")
+
+        def distance(value):
+            return to_non_negative(value, "distance")
+
         own_profile = self.profile.value
         veh_id_field = field(self.IN_VEH_ID)
         seen_ids = set()
@@ -593,9 +645,34 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
                     break_duration=read(
                         feat, self.IN_VEH_BREAK_DURATION, lambda v: to_int(v, "duration"), what
                     ),
+                    fixed_cost=read(feat, self.IN_VEH_FIXED_COST, cost, what),
+                    cost_per_hour=read(feat, self.IN_VEH_COST_PER_HOUR, cost, what),
+                    cost_per_km=read(feat, self.IN_VEH_COST_PER_KM, cost, what),
+                    max_travel_time=read(feat, self.IN_VEH_MAX_TRAVEL_TIME, duration, what),
+                    max_distance=read(feat, self.IN_VEH_MAX_DISTANCE, distance, what),
                     feature=feat,
                 )
             )
+
+        ends = self.parameterAsSource(parameters, self.IN_VEH_ENDS, context)
+        if ends is not None:
+            end_id_field = field(self.IN_VEH_END_ID)
+            if not end_id_field:
+                raise QgsProcessingException(
+                    "The vehicle end points need the field with their vehicle ID"
+                )
+            by_id = {str(v.vehicle_id): v for v in problem.vehicles}
+            for feat in ends.getFeatures():
+                end_id = raw(feat[end_id_field])
+                what = f"The end point of vehicle {end_id}"
+                if end_id is None:
+                    raise QgsProcessingException(f"End point {feat.id()} has no vehicle ID")
+                vehicle = by_id.get(str(end_id))
+                if vehicle is None:
+                    raise QgsProcessingException(f"{what}: there's no such vehicle")
+                if vehicle.end_location is not None:
+                    raise QgsProcessingException(f"Vehicle {end_id} has more than one end point")
+                vehicle.end_location = add_location(feat, ends.sourceCrs(), what)
 
         for feat in jobs_source.getFeatures():
             what = f"Job {feat[job_id_field] if job_id_field else feat.id()}"
@@ -644,6 +721,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
         route_result.append(QgsField(FieldNames.STOPS, QVariant.Int))
         for name in (FieldNames.DURATION, FieldNames.DISTANCE, FieldNames.SERVICE, FieldNames.WAITING):
             route_result.append(QgsField(name, QVariant.Double))
+        route_result.append(QgsField(FieldNames.COST, QVariant.LongLong))
         for name in (FieldNames.START, FieldNames.END):
             route_result.append(QgsField(name, QVariant.LongLong))
         for name in (FieldNames.DELIVERY, FieldNames.PICKUP, FieldNames.VIOLATIONS):

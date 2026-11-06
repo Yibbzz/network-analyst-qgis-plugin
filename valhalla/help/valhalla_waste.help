@@ -3,6 +3,7 @@ The <b>Waste Collection</b> algorithm plans collection rounds: each vehicle coll
 <b>Stops</b> are a point layer of bins or collection points. Optional fields set each stop's waste amount, service time (seconds), time window, required skills and priority.
 <b>Vehicles</b> are a point layer of depots. Optional fields set each vehicle's travel mode, capacity, shift, skills, maximum number of stops and one break.
 <b>Landfills</b> are a point layer of where vehicles empty out; set the time it takes to empty out.
+Like in the VRP, <b>vehicle end points</b>, <b>costs</b> and <b>driving limits</b> are in <i>Advanced Parameters</i>: a vehicle with an end point drives there after its last landfill instead of home, and its maximum travel time and distance count all its trips together, the drive home included. A fixed cost counts in each trip's planning.
 
 Amounts can have several dimensions as comma separated numbers, e.g. "120, 2" for kilograms and cubic meters; capacities use the same order. Times are seconds, "HH:MM[:SS]" text, or time / date-time fields. A trip never ends so late that the vehicle can't empty out and get home within its shift.
 

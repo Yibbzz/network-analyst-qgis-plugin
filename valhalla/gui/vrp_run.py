@@ -65,10 +65,30 @@ PALETTE = ("#6f9cf0", "#f76c5e", "#fdb147", "#3bb273", "#9b6ff0", "#2ec4c4", "#e
 
 
 def split_waypoints(waypoints: List[Waypoint]) -> tuple:
-    """The VRP table's points as (jobs, vehicles)."""
+    """The VRP table's points as (jobs, vehicles); vehicle ends are in ``end_points``."""
     vehicles = [wp for wp in waypoints if wp.attrs.get("role") == VrpRole.VEHICLE.value]
-    jobs = [wp for wp in waypoints if wp.attrs.get("role") != VrpRole.VEHICLE.value]
+    not_jobs = (VrpRole.VEHICLE.value, VrpRole.END.value)
+    jobs = [wp for wp in waypoints if wp.attrs.get("role") not in not_jobs]
     return jobs, vehicles
+
+
+def end_points(waypoints: List[Waypoint]) -> List[Waypoint]:
+    """The table's vehicle ends: each finishes the route of the vehicle named in its Name."""
+    return [wp for wp in waypoints if wp.attrs.get("role") == VrpRole.END.value]
+
+
+def ends_layer(ends: List[Waypoint]) -> QgsVectorLayer:
+    layer = QgsVectorLayer("Point?crs=EPSG:4326", "vehicle ends", "memory")
+    layer.dataProvider().addAttributes([QgsField("vehicle", QVariant.String)])
+    layer.updateFields()
+    feats = list()
+    for wp in ends:
+        feat = QgsFeature(layer.fields())
+        feat.setAttributes([_text(wp.attrs.get("name"))])
+        feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(wp.lon, wp.lat)))
+        feats.append(feat)
+    layer.dataProvider().addFeatures(feats)
+    return layer
 
 
 def _text(value) -> Optional[str]:
@@ -137,6 +157,11 @@ def vehicles_layer(vehicles: List[Waypoint], with_amounts: bool) -> QgsVectorLay
             QgsField("break_start", QVariant.String),
             QgsField("break_end", QVariant.String),
             QgsField("break_seconds", QVariant.Int),
+            QgsField("fixed_cost", QVariant.Int),
+            QgsField("cost_per_hour", QVariant.Int),
+            QgsField("cost_per_km", QVariant.Int),
+            QgsField("max_travel_time", QVariant.Int),
+            QgsField("max_distance", QVariant.Int),
         ]
     )
     layer.updateFields()
@@ -158,6 +183,12 @@ def vehicles_layer(vehicles: List[Waypoint], with_amounts: bool) -> QgsVectorLay
                 _text(wp.attrs.get("break_start")),
                 _text(wp.attrs.get("break_end")),
                 _positive(wp.attrs.get("break_minutes"), 60),  # minutes in the table
+                # VROOM's defaults when not set: no fixed cost, the cost is the travel time
+                int(wp.attrs.get("fixed_cost") or 0),
+                int(3600 if wp.attrs.get("cost_per_hour") is None else wp.attrs["cost_per_hour"]),
+                int(wp.attrs.get("cost_per_km") or 0),
+                _positive(wp.attrs.get("max_minutes"), 60),
+                _positive(wp.attrs.get("max_km"), 1000),
             ]
         )
         feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(wp.lon, wp.lat)))
@@ -202,6 +233,7 @@ class VrpRun:
         timeout: int,
         on_done: Callable[[List[QgsMapLayer], Optional[str]], None],
         keep_order: bool = False,
+        ends: List[Waypoint] = (),
     ):
         self.on_done = on_done
         self.warnings: List[str] = list()
@@ -241,11 +273,20 @@ class VrpRun:
             alg_cls.IN_JOB_SHIPMENT: "shipment",
             alg_cls.IN_JOB_ROLE: "shipment_role",
             alg_cls.IN_VEH_MAX_TASKS: "max_jobs",
+            alg_cls.IN_VEH_FIXED_COST: "fixed_cost",
+            alg_cls.IN_VEH_COST_PER_HOUR: "cost_per_hour",
+            alg_cls.IN_VEH_COST_PER_KM: "cost_per_km",
+            alg_cls.IN_VEH_MAX_TRAVEL_TIME: "max_travel_time",
+            alg_cls.IN_VEH_MAX_DISTANCE: "max_distance",
             alg_cls.IN_KEEP_ORDER: keep_order,
             alg_cls.IN_RETURN: return_to_start,
             alg_cls.IN_EXPLORATION: exploration_level,
             alg_cls.IN_TIMEOUT: timeout,
         }
+        self.ends_layer = ends_layer(ends) if ends else None
+        if self.ends_layer is not None:
+            self.params[alg_cls.IN_VEH_ENDS] = self.ends_layer
+            self.params[alg_cls.IN_VEH_END_ID] = "vehicle"
         # breaks only if a vehicle has one: keeping the order warns about any break field
         if any(_positive(wp.attrs.get("break_minutes"), 60) for wp in vehicles):
             self.params.update(

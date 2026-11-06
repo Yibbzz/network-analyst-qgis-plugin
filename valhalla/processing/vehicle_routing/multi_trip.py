@@ -34,6 +34,9 @@ class _Truck:
     landfill: Optional[int] = None
     trips: int = 0
     done: bool = False
+    # travel so far, against the vehicle's max travel time / distance over all its trips
+    travel_time: int = 0
+    travel_distance: int = 0
 
 
 def _add(a: Optional[List[int]], b: Optional[List[int]]) -> List[int]:
@@ -78,19 +81,33 @@ def solve_multi_trip(  # noqa: C901 - one loop over rounds
             location=v.location,
             time=v.shift[0] if v.shift else 0,
             shift_end=v.shift[1] if v.shift else OPEN_END,
-            home=v.location if return_to_start else None,
+            home=v.end(return_to_start),
             break_pending=bool(v.break_duration),
             steps=[],
         )
         for i, v in enumerate(problem.vehicles)
     ]
     totals: Dict[int, Dict[str, object]] = {
-        t.index: {"duration": 0, "service": 0, "waiting_time": 0, "pickup": [], "delivery": []}
+        t.index: {
+            "duration": 0,
+            "service": 0,
+            "waiting_time": 0,
+            "cost": 0,
+            "pickup": [],
+            "delivery": [],
+        }
         for t in trucks
     }
 
     def time(profile: str, a: int, b: int) -> Optional[float]:
         return matrices[profile][0][a][b]
+
+    def distance(profile: str, a: int, b: int) -> float:
+        return 0 if b is None else matrices[profile][1][a][b] or 0
+
+    def budget(limit: Optional[int], used: int, home: float) -> Optional[int]:
+        """What's left of a max travel time / distance for this trip, keeping the way home."""
+        return None if limit is None else int(round(limit - used - home))  # VROOM wants integers
 
     for _ in range(max_trips):
         if not remaining:
@@ -116,6 +133,13 @@ def solve_multi_trip(  # noqa: C901 - one loop over rounds
             if latest <= truck.time:
                 truck.done = True
                 continue
+            # the trip may use what's left of the day's travel, minus the way home
+            travel_left = budget(vehicle.max_travel_time, truck.travel_time, home)
+            home_m = distance(vehicle.profile, landfill, truck.home)
+            distance_left = budget(vehicle.max_distance, truck.travel_distance, home_m)
+            if any(left is not None and left <= 0 for left in (travel_left, distance_left)):
+                truck.done = True
+                continue
             truck.landfill = landfill
             round_trucks.append(truck)
             round_vehicles.append(
@@ -125,6 +149,8 @@ def solve_multi_trip(  # noqa: C901 - one loop over rounds
                     end_location=landfill,
                     shift=[truck.time, latest],
                     break_duration=vehicle.break_duration if truck.break_pending else None,
+                    max_travel_time=travel_left,
+                    max_distance=distance_left,
                     max_tasks=(
                         None
                         if vehicle.max_tasks is None
@@ -171,8 +197,15 @@ def solve_multi_trip(  # noqa: C901 - one loop over rounds
                 truck.steps.append(step)
             truck.location = truck.landfill
             truck.trips += 1
+            truck.travel_time += route.get("duration", 0)
+            # VROOM's output has no distance: add it up along the trip from the matrix
+            stops = [keep[step["location_index"]] for step in steps if "location_index" in step]
+            truck.travel_distance += sum(
+                distance(problem.vehicles[truck.index].profile, a, b) for a, b in zip(stops, stops[1:])
+            )
             total = totals[truck.index]
             total["duration"] += route.get("duration", 0)
+            total["cost"] += route.get("cost", 0)
             total["service"] += route.get("service", 0) + dump_time
             total["waiting_time"] += route.get("waiting_time", 0)
             total["pickup"] = _add(total["pickup"], route.get("pickup"))

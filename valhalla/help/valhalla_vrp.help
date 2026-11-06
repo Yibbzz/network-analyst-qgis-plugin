@@ -2,6 +2,9 @@ The <b>Vehicle Routing Problem</b> (VRP) algorithm assigns jobs to a fleet of ve
 
 <b>Jobs</b> are a point layer of stops. Optional fields set each job's service time (seconds), delivery and pickup amounts, a time window, required skills and a priority (0 to 100).
 <b>Vehicles</b> are a point layer of where each vehicle starts. Optional fields set its travel mode (auto, truck, bus, bicycle, pedestrian, motorcycle — empty uses this algorithm's), capacity, shift, skills, maximum number of jobs and one break (window and duration in seconds). Vehicles return to their start unless you untick it.
+<b>Vehicle end points</b> (advanced): a point layer of where vehicles finish instead, each with the ID of its vehicle (at most one per vehicle). A vehicle with an end point finishes there whether or not vehicles return to their start.
+<b>Costs</b> (advanced): the solver serves as many jobs as it can, then keeps the total cost lowest. A vehicle's cost is its <i>fixed cost</i> (if it's used at all) + <i>cost per hour</i> × hours travelled + <i>cost per km</i> × km. The defaults (0, 3600, 0) make the cost the travel time in seconds. A fixed cost makes the solver use fewer vehicles, a cost per km prefers shorter routes over faster ones, and different costs per vehicle prefer the cheaper vehicles. The <i>routes</i> output has each route's <i>cost</i>.
+<b>Driving limits</b> (advanced): a vehicle's <i>maximum travel time</i> (seconds) and <i>maximum distance</i> (meters) count only driving, not service or waiting. Jobs that would break them go to another vehicle or stay unassigned.
 
 <b>Mixed fleets</b>: each travel mode gets its own Valhalla matrix and route lines. The costing options in <i>Advanced Parameters</i> only apply to this algorithm's own travel mode; other vehicles use Valhalla's defaults.
 <b>Pickup and delivery</b> (advanced): two jobs with the same <i>shipment ID</i>, one with role <i>pickup</i> and one <i>delivery</i>, are carried by one vehicle, pickup first. The shipment's amount is the delivery amount of either job.
@@ -12,7 +15,7 @@ Amounts can have several dimensions as comma separated numbers, e.g. "500, 2" fo
 Times are seconds, "HH:MM[:SS]" text, or time / date-time fields (from midnight / the Unix epoch). Use one kind for all times in a run.
 
 Outputs:
-  1. <i>routes</i>: one line per used vehicle with its travel mode, number of jobs, travel duration and distance, service and waiting time, start and end time,
+  1. <i>routes</i>: one line per used vehicle with its travel mode, number of jobs, travel duration and distance, service and waiting time, cost, start and end time,
   2. <i>stops</i>: every step in order (start, jobs, breaks, end) with arrival, departure, waiting and load after the step,
   3. <i>unassigned</i>: jobs no vehicle could take: <i>unreachable</i> on the network, <i>not assigned</i> by the solver (capacity, time windows, skills) or, when keeping the order, <i>no vehicle or sequence</i>.
 

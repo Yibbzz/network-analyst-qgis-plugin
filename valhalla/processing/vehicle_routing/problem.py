@@ -107,6 +107,14 @@ def to_int(value: Any, what: str) -> Optional[int]:
         raise ValueError(f"'{value}' is not a valid {what}")
 
 
+def to_non_negative(value: Any, what: str) -> Optional[int]:
+    """A whole number >= 0 (rounded), None for NULL."""
+    number = to_int(value, what)
+    if number is not None and number < 0:
+        raise ValueError(f"'{value}' is negative, a {what} can't be")
+    return number
+
+
 def time_window(start: Optional[int], end: Optional[int]) -> Optional[List[int]]:
     """A VROOM time window, open at the side that's None; None if both are."""
     if start is None and end is None:
@@ -257,7 +265,8 @@ def unreachable_jobs(problem: "Problem", matrices: "Matrices", return_to_start: 
 
     def reachable(vehicle: Vehicle, *locations: int) -> bool:
         durations = matrices[vehicle.profile][0]
-        path = [vehicle.location, *locations] + ([vehicle.location] if return_to_start else [])
+        end = vehicle.end(return_to_start)
+        path = [vehicle.location, *locations] + ([] if end is None else [end])
         return all(durations[a][b] is not None for a, b in zip(path, path[1:]))
 
     unreachable = list()
@@ -292,6 +301,20 @@ class Vehicle:
     feature: Any = None  # the input feature, for the outputs
     # where the route ends; None = back at the start if returning, else wherever it ends
     end_location: Optional[int] = None
+    # VROOM's costs: what using the vehicle costs, per hour of travel and per km; None = VROOM's
+    # defaults (0, 3600, 0: the cost is the travel time in seconds)
+    fixed_cost: Optional[int] = None
+    cost_per_hour: Optional[int] = None
+    cost_per_km: Optional[int] = None
+    # limits on the route's travel (service and waiting not counted): seconds, meters
+    max_travel_time: Optional[int] = None
+    max_distance: Optional[int] = None
+
+    def end(self, return_to_start: bool) -> Optional[int]:
+        """The location the route ends at, None for an open end."""
+        if self.end_location is not None:
+            return self.end_location
+        return self.location if return_to_start else None
 
 
 @dataclass
@@ -447,10 +470,23 @@ def build_vroom_problem(  # noqa: C901
     vehicles = list()
     for i, v in enumerate(problem.vehicles):
         vehicle = {"id": i, "profile": v.profile, "start_index": new_index[v.location]}
-        if v.end_location is not None:
-            vehicle["end_index"] = new_index[v.end_location]
-        elif return_to_start:
-            vehicle["end_index"] = new_index[v.location]
+        if v.end(return_to_start) is not None:
+            vehicle["end_index"] = new_index[v.end(return_to_start)]
+        costs = {
+            key: value
+            for key, value in (
+                ("fixed", v.fixed_cost),
+                ("per_hour", v.cost_per_hour),
+                ("per_km", v.cost_per_km),
+            )
+            if value is not None
+        }
+        if costs:
+            vehicle["costs"] = costs
+        if v.max_travel_time is not None:
+            vehicle["max_travel_time"] = v.max_travel_time
+        if v.max_distance is not None:
+            vehicle["max_distance"] = v.max_distance
         if dims and has_capacity:
             vehicle["capacity"] = pad_amounts([v.capacity], dims)[0]
         if v.shift:
@@ -469,7 +505,7 @@ def build_vroom_problem(  # noqa: C901
             vehicle["steps"] = (
                 [{"type": "start"}]
                 + [{"type": types[k], "id": k} for _, k in steps]
-                + ([{"type": "end"}] if return_to_start or v.end_location is not None else [])
+                + ([{"type": "end"}] if v.end(return_to_start) is not None else [])
             )
         vehicles.append(vehicle)
 
