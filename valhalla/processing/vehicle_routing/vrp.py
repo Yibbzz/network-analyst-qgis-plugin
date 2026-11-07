@@ -8,10 +8,12 @@ the matrices are requested through the plugin's own provider + costing options, 
 other algorithm. The problem as plain data lives in problem.py.
 """
 
+import math
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from qgis.core import (
+    QgsDistanceArea,
     QgsFeature,
     QgsFeatureSource,
     QgsField,
@@ -161,6 +163,7 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
     IN_THREADS = "INPUT_THREADS"
     IN_MAX_PAIRS = "INPUT_MAX_MATRIX_PAIRS"
     IN_MAX_LOCATIONS = "INPUT_MAX_ROUTE_LOCATIONS"
+    IN_FAR_POINTS = "INPUT_FAR_POINT_WARNING"
 
     OUT_STOPS = "OUTPUT_STOPS"
     OUT_UNASSIGNED = "OUTPUT_UNASSIGNED"
@@ -320,6 +323,16 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             param.setFlags(param.flags() | QgsProcessingParameterDefinition.Flag.FlagAdvanced)
             self.addParameter(param)
 
+        far = QgsProcessingParameterNumber(
+            self.IN_FAR_POINTS,
+            "Warn about points farther than this from a road (meters, 0 = don't check)",
+            type=QgsProcessingParameterNumber.Type.Double,
+            defaultValue=500,
+            minValue=0,
+        )
+        far.setFlags(far.flags() | QgsProcessingParameterDefinition.Flag.FlagAdvanced)
+        self.addParameter(far)
+
         self.addParameter(
             QgsProcessingParameterFeatureSink(self.OUT_STOPS, "vrp_stops", createByDefault=True)
         )
@@ -381,6 +394,13 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
 
         # the route lines adapt this to the server's limit, see _route_geometry
         self._max_locations = max_locations
+
+        # Valhalla routes a point from its nearest road, however far: say so
+        far_limit = self.parameterAsDouble(parameters, self.IN_FAR_POINTS, context)
+        if far_limit > 0:
+            self._warn_far_points(results_factory, problem, far_limit, feedback)
+            if feedback.isCanceled():
+                return {}
 
         # 1. a matrix between all locations per travel mode, in chunks of source rows
         matrices = self._matrices(results_factory, problem, params, max_pairs, feedback)
@@ -834,6 +854,95 @@ class ValhallaVrpBase(ValhallaBaseAlgorithm):
             distance += direction.distance or 0
 
         return QgsGeometry.fromPolylineXY(points), distance
+
+    def _location_labels(self, problem: Problem) -> Dict[int, str]:
+        """What each of problem.coords is, for messages. Subclasses add their own points."""
+        labels = {job.location: job.label for job in problem.jobs}
+        for v in problem.vehicles:
+            labels[v.location] = f"Vehicle {v.vehicle_id}"
+            if v.end_location is not None:
+                labels[v.end_location] = f"Vehicle {v.vehicle_id}'s end point"
+        return labels
+
+    def _warn_far_points(self, results_factory, problem: Problem, limit: float, feedback):
+        """
+        Warns about points more than ``limit`` meters from the road Valhalla routes them from.
+        Valhalla snaps a point to its nearest road up to 35 km away without a word, so a job in
+        the wrong place (or the wrong CRS) looks served while the vehicle stops somewhere else.
+        A vehicle's points count on its own travel mode, the others on the closest of the fleet's.
+        """
+        own = {v.location: v.profile for v in problem.vehicles}
+        own.update({v.end_location: v.profile for v in problem.vehicles if v.end_location is not None})
+        off_road: Dict[int, float] = dict()
+        for profile in problem.profiles():
+            try:
+                distances = self._snap_distances(results_factory, profile, problem.coords, feedback)
+            except QgsProcessingException as e:
+                feedback.reportError(f"Couldn't check how far the points are from roads: {e}", False)
+                return
+            for i, d in enumerate(distances):
+                if own.get(i, profile) == profile:
+                    off_road[i] = min(off_road.get(i, math.inf), d)
+
+        far = sorted(((d, i) for i, d in off_road.items() if d > limit), reverse=True)
+        if not far:
+            return
+        labels = self._location_labels(problem)
+
+        def text(meters: float) -> str:
+            if math.isinf(meters):
+                return "no road found"
+            return f"{meters / 1000:.1f} km" if meters >= 1000 else f"{meters:.0f} m"
+
+        listed = ", ".join(f"{labels.get(i, f'Point {i + 1}')} ({text(d)})" for d, i in far[:5])
+        more = f" and {len(far) - 5} more" if len(far) > 5 else ""
+        feedback.reportError(
+            f"{len(far)} {'point is' if len(far) == 1 else 'points are'} more than {text(limit)} from a "
+            f"road, so they're served from the nearest road instead: {listed}{more}",
+            fatalError=False,
+        )
+
+    def _snap_distances(self, results_factory, profile: str, coords, feedback) -> List[float]:
+        """Meters from each point to where Valhalla's /locate puts it on a road (inf: none)."""
+        distance_area = QgsDistanceArea()
+        distance_area.setEllipsoid("WGS84")
+        client = results_factory.router.router.client
+        out: List[float] = list()
+        start = 0
+        while start < len(coords):
+            chunk = coords[start : start + self._max_locations]
+            body = {"locations": [{"lon": x, "lat": y} for x, y in chunk], "costing": profile}
+            try:
+                located = self._client_request(client, "/locate", body)
+            except ServerLimitError as e:
+                self._max_locations = self._smaller_limit(
+                    e, self._max_locations, 1, "locations", feedback
+                )
+                continue
+            for (x, y), location in zip(chunk, located or []):
+                out.append(
+                    min(
+                        (
+                            distance_area.measureLine(
+                                QgsPointXY(x, y), QgsPointXY(e["correlated_lon"], e["correlated_lat"])
+                            )
+                            for e in location.get("edges") or []
+                        ),
+                        default=math.inf,
+                    )
+                )
+            start += len(chunk)
+        return out
+
+    @staticmethod
+    def _client_request(client, url: str, body: dict):
+        try:
+            return client._request(url, post_params=body)
+        except (routingpy.exceptions.RouterApiError, routingpy.exceptions.RouterServerError) as e:
+            limit = server_limit(e.message)
+            if limit is not None:
+                raise ServerLimitError(f"HTTP {e.status}: {e.message}", limit)
+            raise QgsProcessingException(f"HTTP {e.status}: {e.message}")
 
     def _matrices(
         self, results_factory, problem: Problem, params: dict, max_pairs: int, feedback

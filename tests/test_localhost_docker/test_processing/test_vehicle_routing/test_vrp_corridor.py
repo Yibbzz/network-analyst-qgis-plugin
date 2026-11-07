@@ -84,6 +84,15 @@ def jobs(*xys, **fields) -> QgsVectorLayer:
     return points("jobs", [{"xy": xy, "name": f"j{i}", **fields} for i, xy in enumerate(xys)])
 
 
+class _Feedback(QgsProcessingFeedback):
+    def __init__(self):
+        super().__init__()
+        self.warnings: List[str] = list()
+
+    def reportError(self, error, fatalError=False):
+        self.warnings.append(error)
+
+
 class TestVrpCorridor(LocalhostDockerTestCase):
     @classmethod
     def setUpClass(cls):
@@ -103,7 +112,7 @@ class TestVrpCorridor(LocalhostDockerTestCase):
         params = {"INPUT_FIELD_1": "name", "INPUT_VEHICLE_ID": "name", **params}
         for out in (alg.OUT, alg.OUT_STOPS, alg.OUT_UNASSIGNED):
             params[out] = QgsProcessingOutputLayerDefinition("TEMPORARY_OUTPUT")
-        ctx, feedback = QgsProcessingContext(), QgsProcessingFeedback()
+        ctx, feedback = QgsProcessingContext(), _Feedback()
         self.assertTrue(alg.prepareAlgorithm(params, ctx, feedback))
         result = alg.processAlgorithm(params, ctx, feedback)
         layers = {
@@ -114,6 +123,7 @@ class TestVrpCorridor(LocalhostDockerTestCase):
                 ("unassigned", alg.OUT_UNASSIGNED),
             )
         }
+        layers["warnings"] = feedback.warnings
         return layers
 
     @staticmethod
@@ -350,3 +360,40 @@ class TestVrpCorridor(LocalhostDockerTestCase):
         self.assertEqual([f["type"] for f in steps[-2:]], ["landfill", "end"])
         self.assertAlmostEqual(steps[-1].geometry().asPoint().x(), m(20)[0], places=6)
         self.assertLessEqual(self.route(out, "t")["duration"], 3600)
+
+    # ------------------------------------------------------------------ points far from roads
+    def far_warnings(self, out) -> List[str]:
+        return [w for w in out["warnings"] if "from a road" in w]
+
+    def test_far_points(self):
+        """A job 2 km south of Main Road and a depot ~800 m off it are named; 100 m off isn't."""
+        out = self.run_alg(
+            {
+                "INPUT_LAYER_1": jobs(m(5), (m(8)[0], -2 * KM), (m(12)[0], -0.1 * KM)),
+                "INPUT_VEHICLES": points("vehicles", [{"xy": (m(0)[0], -0.8 * KM), "name": "v"}]),
+            }
+        )
+        (warning,) = self.far_warnings(out)
+        self.assertIn("2 points are more than 500 m from a road", warning)
+        self.assertRegex(warning, r"Job j1 \(2\.0 km\), Vehicle v \(79\d m\)")
+        self.assertNotIn("j2", warning)
+        # served anyway, from the road
+        self.assertEqual(set(self.served(out).values()), {"v"})
+
+    def test_far_points_threshold_and_off(self):
+        job = jobs((m(8)[0], -0.3 * KM))
+        vehicles = points("vehicles", [{"xy": m(0), "name": "v"}])
+        for limit, warned in ((200, True), (500, False), (0, False)):
+            with self.subTest(limit=limit):
+                out = self.run_alg(
+                    {"INPUT_LAYER_1": job, "INPUT_VEHICLES": vehicles, "INPUT_FAR_POINT_WARNING": limit}
+                )
+                self.assertEqual(bool(self.far_warnings(out)), warned)
+
+    def test_far_landfill(self):
+        # 1 km off in KM degrees, measured north-south: 993 m, a degree of latitude is shorter
+        out = self.run_waste(
+            {}, {"INPUT_LANDFILLS": points("landfills", [{"xy": (m(0)[0], -1 * KM), "name": "dump"}])}
+        )
+        (warning,) = self.far_warnings(out)
+        self.assertIn("Landfill 1 (993 m)", warning)

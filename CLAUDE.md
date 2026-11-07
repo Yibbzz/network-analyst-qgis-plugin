@@ -429,6 +429,13 @@ copied), unassigned (reason `unreachable` or `not assigned`).
   left minus the drive home); budgets must be ints (VROOM rejects 1.5 m).
   Dock: a third row type `end` (Name = the vehicle's name) + advanced vehicle columns Fixed
   cost, Cost/h (default 3600), Cost/km, Max drive (min), Max km.
+- **Far points** (`_warn_far_points`, advanced `INPUT_FAR_POINT_WARNING`, default 500 m, 0 = off):
+  Valhalla snaps a point to its nearest road up to 35 km away without a word. Before the
+  matrices, `/locate` (chunked by the route-locations limit, same `ServerLimitError` retry)
+  gives each point's road position; a vehicle's points count on its own mode, the rest on the
+  closest of the fleet's. Non-fatal warning (lands in the dock's warnings too); a failing
+  `/locate` only warns that it couldn't check. Subclasses label their points via
+  `_location_labels` (waste: landfills).
 - **Assigned vehicle (locks)**: VROOM can't pin a job to a vehicle, so every vehicle gets its own
   skill `LOCK_SKILL_BASE + i` and a locked job requires it. IDs compare as text.
 - **Keep the order (plan mode)**: vehicles get VROOM `steps` from the sequence field and the runner

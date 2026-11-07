@@ -4,7 +4,7 @@ on with the next trip (multi_trip.py), until the bins or their shifts run out.
 """
 
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from qgis.core import (
     QgsProcessing,
@@ -103,6 +103,11 @@ class ValhallaWasteBase(ValhallaVrpBase):
             self._landfills.append(len(problem.coords) - 1)
         if not self._landfills:
             raise QgsProcessingException("The landfills layer has no points")
+
+    def _location_labels(self, problem: Problem) -> Dict[int, str]:
+        labels = super()._location_labels(problem)
+        labels.update({i: f"Landfill {n + 1}" for n, i in enumerate(self._landfills)})
+        return labels
 
     def _solve(
         self,
